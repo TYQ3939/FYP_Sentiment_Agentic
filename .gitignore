@@ -1,0 +1,26 @@
+# --- Security (CRITICAL) ---
+.env
+keys.json
+*.pem
+
+# --- Python & Dependencies ---
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+.venv/
+build/
+dist/
+
+# --- AI & Playwright ---
+# Prevents uploading large browser binaries (Chromium, Firefox)
+.playwright/
+ms-playwright/
+# Logs from agents
+*.log
+agent_trace/
+
+# --- OS Specific ---
+.DS_Store
+Thumbs.db
