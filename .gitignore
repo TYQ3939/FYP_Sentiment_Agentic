@@ -1,26 +1,39 @@
-# --- Security (CRITICAL) ---
+# Environment variables
 .env
-keys.json
-*.pem
+.env.local
+*.env
 
-# --- Python & Dependencies ---
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
 venv/
 env/
-.venv/
-build/
-dist/
+.venv
 
-# --- AI & Playwright ---
-# Prevents uploading large browser binaries (Chromium, Firefox)
-.playwright/
-ms-playwright/
-# Logs from agents
+# Data & Logs
+shared_state.json
+jobs_db.json
+data/
+models/
+logs/
 *.log
-agent_trace/
 
-# --- OS Specific ---
+# IDE
+.vs/
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
 .DS_Store
 Thumbs.db
+
+# Testing
+.pytest_cache/
+.coverage
+
+# Temp files
+*.tmp
+temp/
