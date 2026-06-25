@@ -1,465 +1,358 @@
-﻿# Windows asyncio fix at ABSOLUTE module level - BEFORE anything else
-import sys
-import asyncio
+"""
+Reddit data collector using the Arctic Shift live API
+(https://arctic-shift.photon-reddit.com).
 
-if sys.platform == "win32":
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+CORE API RULES & SAFEGUARDS
+────────────────────────────
+1. Throttling      : time.sleep(1.5) after every single network request.
+2. Chunk cap       : limit=100 on every API call (server maximum).
+3. Cursor bypass   : use `before=<oldest_created_utc>` to scroll past 1 000-row
+                     depth limit without re-querying the same rows.
+4. Lucene format   : multi-word keywords are wrapped in double-quotes and joined
+                     with ' OR ' (e.g. '"iphone 17 pro" OR "iphone 17 max"').
+                     Applied as local filter on title+selftext because the
+                     `/api/posts/search` endpoint rejects the `q` parameter.
+5. ID chunk size   : max 20 post IDs per comment request to prevent HTTP 414.
+6. Sticky filter   : skip any post whose stickied / pinned / is_pinned flag is
+                     True to avoid infinite megathread comment loops.
+"""
 
-# NOW import everything else
-import os
 import json
 import time
-from datetime import datetime, timedelta
-from playwright.async_api import async_playwright
+import requests
+import pandas as pd
+from datetime import datetime
 
-# ========== LLM-BASED SUBREDDIT MAPPER ==========
+# ─── API endpoints ─────────────────────────────────────────────────────────────
+_API_BASE         = "https://arctic-shift.photon-reddit.com"
+_POSTS_ENDPOINT   = f"{_API_BASE}/api/posts/search"
+_COMMENTS_ENDPOINT = f"{_API_BASE}/api/comments/search"
 
-def infer_subreddits_from_topic(topic: str, llm) -> list:
-    """Uses the LLM to infer relevant subreddits based on the user's input topic."""
-    
-    prompt = f"""
-    Given the topic: "{topic}"
-    
-    Generate a list of the TOP 3 most relevant Reddit subreddits where people discuss this topic.
-    
-    Return ONLY a JSON array of subreddit names (without the 'r/' prefix), like this:
-    ["subreddit1", "subreddit2", "subreddit3"]
-    
-    Make sure the subreddits exist and are active. Do NOT include inactive or made-up subreddits.
-    Focus on popular, relevant communities.
+# ─── Guardrail constants ───────────────────────────────────────────────────────
+_SLEEP            = 1.5    # seconds between every request  (rule 1)
+_MAX_LIMIT        = 100    # items per request               (rule 2)
+
+# ─── Collection parameters ─────────────────────────────────────────────────────
+_MIN_COMMENTS     = 500
+_MAX_LOOKBACK_WEEKS = 24   # safety cap on outer loop
+_POST_POOL_TARGET = 50     # minimum matching posts before fetching comments
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STEP 1 — TOPIC STRUCTURING (LLM ROUTER)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def infer_topic_structure(topic: str, llm) -> dict:
     """
-    
+    Ask the LLM to return the top 3 subreddits and 2-4 keyword variations for
+    the given topic.
+
+    Returns:
+        {"subreddits": [...], "keywords": [...]}
+    """
+    prompt = f"""Given the topic: "{topic}"
+
+Return ONLY a JSON object with this exact schema:
+{{
+    "subreddits": ["subreddit1", "subreddit2", "subreddit3"],
+    "keywords": ["keyword1", "keyword2", "keyword3"]
+}}
+
+Rules:
+- subreddits: TOP 3 most relevant active subreddits (without 'r/' prefix).
+- keywords: 2-4 lowercase keyword variations people would type when discussing
+  this topic (e.g. brand names, abbreviations, alternate spellings).
+
+Output ONLY the JSON object — no explanation."""
+
     try:
-        print(f"LLM analyzing topic: '{topic}' to find relevant subreddits...")
+        print(f"  LLM structuring topic: '{topic}'...")
         response = llm.invoke(prompt)
-        
-        if hasattr(response, 'content'):
-            response_text = response.content
-        else:
-            response_text = str(response)
-        
-        json_start = response_text.find('[')
-        json_end = response_text.rfind(']') + 1
-        
-        if json_start != -1 and json_end > json_start:
-            json_str = response_text[json_start:json_end]
-            subreddits = json.loads(json_str)
-            print(f"✅ LLM suggested subreddits: {subreddits}")
-            return subreddits
-        else:
-            print("⚠️ Could not parse LLM response, using fallback subreddits")
-            return ["iphone", "apple", "technology"]
-    
-    except Exception as e:
-        error_msg = str(e)
-        print(f"⚠️ LLM error: {error_msg[:150]}...")
-        print("Using fallback subreddits: ['iphone', 'apple', 'technology']")
-        return ["iphone", "apple", "technology"]
+        text     = response.content if hasattr(response, "content") else str(response)
 
+        start = text.find("{")
+        end   = text.rfind("}") + 1
+        if start != -1 and end > start:
+            parsed     = json.loads(text[start:end])
+            subreddits = parsed.get("subreddits", [])
+            keywords   = parsed.get("keywords",   [topic.lower()])
+            print(f"  Subreddits : {subreddits}")
+            print(f"  Keywords   : {keywords}")
+            return {"subreddits": subreddits, "keywords": keywords}
 
-# ========== DATA PARSING AND FILTERING ==========
+        print("  Could not parse LLM response — using fallback")
 
-def parse_and_filter_data(subreddit: str, topic: str, posts_file: str, comments_file: str) -> dict:
-    """Parses posts and comments JSONL files, filters by topic keyword, and matches comments to posts."""
-    
-    filtered_posts = []
-    filtered_comments = []
-    
-    try:
-        print(f"Parsing posts file: {posts_file}")
-        if os.path.exists(posts_file):
-            with open(posts_file, 'r', encoding='utf-8') as f:
-                for line in f:
-                    if line.strip():
-                        try:
-                            post = json.loads(line)
-                            title = post.get("title", "").lower()
-                            topic_lower = topic.lower()
-                            
-                            if topic_lower in title or _is_topic_related(title, topic_lower):
-                                filtered_posts.append({
-                                    "link_id": post.get("id", ""),
-                                    "title": post.get("title", ""),
-                                    "text": post.get("selftext", ""),
-                                    "score": post.get("score", 0),
-                                    "created_at": post.get("created_utc", ""),
-                                    "author": post.get("author", ""),
-                                    "url": post.get("url", "")
-                                })
-                        except json.JSONDecodeError:
-                            continue
-        else:
-            print(f"⚠️ Posts file not found: {posts_file}")
-        
-        print(f"✅ Filtered posts by topic: {len(filtered_posts)} posts found")
-        
-        link_ids = set(post["link_id"] for post in filtered_posts)
-        print(f"Extracted link_ids: {len(link_ids)} unique post IDs")
-        
-        print(f"Parsing comments file: {comments_file}")
-        if os.path.exists(comments_file):
-            with open(comments_file, 'r', encoding='utf-8') as f:
-                for line in f:
-                    if line.strip():
-                        try:
-                            comment = json.loads(line)
-                            comment_link_id = comment.get("link_id", "").replace("t3_", "")
-                            
-                            if comment_link_id in link_ids:
-                                filtered_comments.append({
-                                    "link_id": comment_link_id,
-                                    "text": comment.get("body", ""),
-                                    "score": comment.get("score", 0),
-                                    "created_at": comment.get("created_utc", ""),
-                                    "author": comment.get("author", "")
-                                })
-                        except json.JSONDecodeError:
-                            continue
-        else:
-            print(f"⚠️ Comments file not found: {comments_file}")
-        
-        print(f"✅ Filtered comments by link_id: {len(filtered_comments)} comments found")
-        
-        return {
-            "subreddit": subreddit,
-            "topic": topic,
-            "posts": filtered_posts,
-            "comments": filtered_comments,
-            "posts_count": len(filtered_posts),
-            "comments_count": len(filtered_comments),
-            "status": "success"
-        }
-    
-    except Exception as e:
-        print(f"❌ Error parsing and filtering data: {str(e)}")
-        return {
-            "subreddit": subreddit,
-            "topic": topic,
-            "posts": [],
-            "comments": [],
-            "posts_count": 0,
-            "comments_count": 0,
-            "status": "error",
-            "error_message": str(e)
-        }
+    except Exception as exc:
+        print(f"  LLM error: {str(exc)[:150]}")
 
-
-def _is_topic_related(title: str, topic: str) -> bool:
-    """Helper function to check if title is related to topic."""
-    keywords = topic.split()
-    matching_keywords = sum(1 for keyword in keywords if keyword in title)
-    return matching_keywords >= len(keywords) * 0.5 if keywords else False
-
-
-# ========== ARCTIC SHIFT (REDDIT) SCRAPER ==========
-
-async def automate_arctic_shift_download(subreddit: str, start_date: str, end_date: str, data_dir: str = "./data/raw_data") -> tuple:
-    """
-    Automates the Arctic Shift website to download Reddit posts and comments data.
-    """
-    
-    os.makedirs(data_dir, exist_ok=True)
-    
-    print(f"\n{'='*70}")
-    print(f"🚀 Starting Arctic Shift Download Process")
-    print(f"{'='*70}")
-    print(f"Subreddit: {subreddit}")
-    print(f"Date Range: {start_date} to {end_date}")
-    print(f"{'='*70}\n")
-    
-    browser = None
-    context = None
-    page = None
-    
-    try:
-        print("📱 Launching browser...")
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            context = await browser.new_context(accept_downloads=True)
-            page = await context.new_page()
-            print("✅ Browser and page created\n")
-            
-            # Step 1: Navigate to Arctic Shift
-            print(f"📡 Step 1: Navigating to Arctic Shift download tool...")
-            try:
-                await page.goto("https://arctic-shift.photon-reddit.com/download-tool", wait_until="networkidle", timeout=60000)
-                print("✅ Page loaded successfully\n")
-            except Exception as e:
-                print(f"❌ Failed to load page: {str(e)}")
-                raise
-            
-            await page.wait_for_load_state("domcontentloaded")
-            await page.wait_for_timeout(2000)
-            
-            # Step 2: Ensure "r/" toggle is selected
-            print(f"🔘 Step 2: Ensuring subreddit toggle (r/) is selected...")
-            try:
-                toggle_buttons = await page.query_selector_all(".option-selector button.option")
-                if len(toggle_buttons) >= 1:
-                    await toggle_buttons[0].click()
-                    print("  ✅ Subreddit toggle (r/) selected\n")
-            except Exception as e:
-                print(f"  ⚠️ Could not ensure toggle selection: {str(e)}, proceeding\n")
-            
-            # Step 3: Fill subreddit name
-            print(f"📝 Step 3: Filling form fields...")
-            try:
-                subreddit_input = await page.query_selector("input[placeholder='Subreddit name']")
-                if subreddit_input:
-                    await subreddit_input.fill("")
-                    await subreddit_input.fill(subreddit)
-                    print(f"  ✅ Subreddit field filled: {subreddit}")
-                else:
-                    raise Exception("Could not find subreddit input field")
-            except Exception as e:
-                print(f"  ❌ Failed to fill subreddit: {str(e)}")
-                raise
-            
-            # Step 4: Fill start date
-            try:
-                text_inputs = await page.query_selector_all("input[type='text'].text-input")
-                if len(text_inputs) >= 2:
-                    await text_inputs[1].fill(start_date)
-                    print(f"  ✅ Start date filled: {start_date}")
-                else:
-                    raise Exception("Could not find start date input field")
-            except Exception as e:
-                print(f"  ❌ Failed to fill start date: {str(e)}")
-                raise
-            
-            # Step 5: Fill end date
-            try:
-                text_inputs = await page.query_selector_all("input[type='text'].text-input")
-                if len(text_inputs) >= 3:
-                    await text_inputs[2].fill(end_date)
-                    print(f"  ✅ End date filled: {end_date}\n")
-                else:
-                    raise Exception("Could not find end date input field")
-            except Exception as e:
-                print(f"  ❌ Failed to fill end date: {str(e)}")
-                raise
-            
-            # Step 6: Check "Download posts" checkbox
-            print(f"☑️  Step 4: Checking download options...")
-            try:
-                posts_checkbox = await page.query_selector("#download-posts")
-                if posts_checkbox:
-                    is_checked = await posts_checkbox.is_checked()
-                    if not is_checked:
-                        await posts_checkbox.check()
-                        print("  ✅ 'Download posts' checkbox checked")
-                    else:
-                        print("  ✅ 'Download posts' checkbox already checked")
-                else:
-                    raise Exception("Could not find 'Download posts' checkbox")
-            except Exception as e:
-                print(f"  ❌ Failed to check posts checkbox: {str(e)}")
-                raise
-            
-            # Step 7: Check "Download comments" checkbox
-            try:
-                comments_checkbox = await page.query_selector("#download-comments")
-                if comments_checkbox:
-                    is_checked = await comments_checkbox.is_checked()
-                    if not is_checked:
-                        await comments_checkbox.check()
-                        print("  ✅ 'Download comments' checkbox checked\n")
-                    else:
-                        print("  ✅ 'Download comments' checkbox already checked\n")
-                else:
-                    raise Exception("Could not find 'Download comments' checkbox")
-            except Exception as e:
-                print(f"  ❌ Failed to check comments checkbox: {str(e)}")
-                raise
-            
-            # Step 8: Click "Start" button
-            print(f"🎯 Step 5: Clicking 'Start' button...")
-            try:
-                start_button = await page.query_selector("button.main-action.primary")
-                if start_button:
-                    button_text = await start_button.text_content()
-                    print(f"  Found button with text: '{button_text.strip()}'")
-                    await start_button.click()
-                    print("  ✅ 'Start' button clicked")
-                else:
-                    raise Exception("Could not find 'Start' button")
-                
-                await page.wait_for_timeout(2000)
-            except Exception as e:
-                print(f"  ❌ Failed to click Start button: {str(e)}")
-                raise
-            
-            # Step 9: Handle file save dialogs
-            print(f"\n💾 Step 6: Handling file save dialogs...")
-            
-            posts_file = None
-            comments_file = None
-            
-            try:
-                print("  ⏳ Waiting for posts file download...")
-                posts_download = await page.wait_for_download(timeout=120000)
-                
-                posts_filename = f"{subreddit}_posts_{start_date}_to_{end_date}.jsonl"
-                posts_file = os.path.join(data_dir, posts_filename)
-                
-                await posts_download.save_as(posts_file)
-                print(f"  ✅ Posts file saved: {posts_file}")
-                
-                await page.wait_for_timeout(1000)
-                
-                print("  ⏳ Waiting for comments file download...")
-                comments_download = await page.wait_for_download(timeout=120000)
-                
-                comments_filename = f"{subreddit}_comments_{start_date}_to_{end_date}.jsonl"
-                comments_file = os.path.join(data_dir, comments_filename)
-                
-                await comments_download.save_as(comments_file)
-                print(f"  ✅ Comments file saved: {comments_file}\n")
-            
-            except asyncio.TimeoutError:
-                print("  ❌ File download timeout (exceeded 2 minutes)")
-                raise TimeoutError("File download timed out")
-            
-            except Exception as e:
-                print(f"  ❌ Failed to save files: {str(e)}")
-                raise
-            
-            # Verify files exist
-            print(f"🔍 Step 7: Verifying downloaded files...")
-            
-            if not os.path.exists(posts_file):
-                raise Exception(f"Posts file was not saved: {posts_file}")
-            
-            if not os.path.exists(comments_file):
-                raise Exception(f"Comments file was not saved: {comments_file}")
-            
-            posts_size = os.path.getsize(posts_file)
-            comments_size = os.path.getsize(comments_file)
-            
-            print(f"  ✅ Posts file verified: {posts_size:,} bytes")
-            print(f"  ✅ Comments file verified: {comments_size:,} bytes\n")
-            
-            print(f"{'='*70}")
-            print(f"✅ Download completed successfully!")
-            print(f"{'='*70}\n")
-            
-            return posts_file, comments_file
-    
-    except Exception as e:
-        print(f"\n{'='*70}")
-        print(f"❌ Download failed: {str(e)}")
-        print(f"{'='*70}\n")
-        raise
-    
-    finally:
-        if context:
-            try:
-                await context.close()
-            except:
-                pass
-        if browser:
-            try:
-                await browser.close()
-            except:
-                pass
-
-
-# ========== RETRY LOGIC ==========
-
-def scrape_with_retry(subreddit: str, topic: str, min_comments: int = 500, max_iterations: int = 2) -> dict:
-    """
-    Scrapes data with retry logic for expanded date ranges.
-    
-    ⚠️ CRITICAL: Uses asyncio.run() to create fresh event loop with correct policy
-    """
-    
-    all_posts = []
-    all_comments = []
-    iteration = 0
-    base_wait_time = 2
-    
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=1)
-    
-    while iteration < max_iterations:
-        iteration += 1
-        wait_time = base_wait_time * (2 ** (iteration - 1))
-        
-        print(f"\n{'='*60}")
-        print(f"Iteration {iteration}/{max_iterations}")
-        print(f"Date Range: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
-        print(f"{'='*60}")
-        
-        try:
-            if iteration > 1:
-                print(f"⏳ Waiting {wait_time}s before next request...")
-                time.sleep(wait_time)
-            
-            # ⚠️ CRITICAL: Use asyncio.run() to create fresh event loop with correct policy
-            posts_file, comments_file = asyncio.run(
-                automate_arctic_shift_download(
-                    subreddit, 
-                    start_date.strftime("%Y-%m-%d"), 
-                    end_date.strftime("%Y-%m-%d")
-                )
-            )
-            
-            # Parse and filter the downloaded data
-            if posts_file and comments_file:
-                filtered_data = parse_and_filter_data(subreddit, topic, posts_file, comments_file)
-                all_posts.extend(filtered_data["posts"])
-                all_comments.extend(filtered_data["comments"])
-                
-                print(f"\nIteration {iteration} summary:")
-                print(f"  Posts: {filtered_data['posts_count']}")
-                print(f"  Comments: {filtered_data['comments_count']}")
-                print(f"  Total comments: {len(all_comments)}")
-                
-                if len(all_comments) >= min_comments:
-                    print(f"\n✅ SUCCESS: Reached {len(all_comments)} comments (target: {min_comments})")
-                    break
-        
-        except Exception as e:
-            print(f"⚠️ Iteration {iteration} error: {str(e)[:80]}...")
-            if iteration >= max_iterations:
-                print(f"❌ Max iterations reached ({max_iterations})")
-                break
-        
-        # Prepare next iteration with expanded date range
-        if iteration < max_iterations and len(all_comments) < min_comments:
-            start_date = start_date - timedelta(days=2)
-            print(f"Expanding date range for next iteration...")
-    
-    # Remove duplicate comments
-    unique_comments = {c["text"]: c for c in all_comments}
-    
     return {
-        "subreddit": subreddit,
-        "topic": topic,
-        "posts": all_posts,
-        "comments": list(unique_comments.values()),
-        "posts_count": len(all_posts),
-        "comments_count": len(unique_comments),
-        "iterations_used": iteration,
-        "target_reached": len(unique_comments) >= min_comments,
-        "scraped_at": datetime.now().isoformat()
+        "subreddits": ["iphone", "apple", "technology"],
+        "keywords"  : [topic.lower()],
     }
 
 
-def scrape_arctic_shift_sync(subreddit: str, start_date: str, end_date: str) -> dict:
-    """Synchronous wrapper for scraping Arctic Shift."""
-    
-    # ⚠️ CRITICAL: Use asyncio.run() instead of manual loop management
-    posts_file, comments_file = asyncio.run(
-        automate_arctic_shift_download(subreddit, start_date, end_date)
+# ═══════════════════════════════════════════════════════════════════════════════
+# INTERNAL HELPERS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _format_lucene_query(keywords: list) -> str:
+    """
+    Format keywords as a Lucene OR query string.
+    Multi-word terms are wrapped in double-quotes.
+
+    Example: ["iphone 17 pro", "iphone 17"] -> '"iphone 17 pro" OR "iphone 17"'
+    """
+    return " OR ".join(f'"{k}"' for k in keywords)
+
+
+def _keyword_match(post: dict, keywords: list) -> bool:
+    """
+    Return True if any keyword appears (case-insensitive) in the post's
+    combined title + selftext.  This is the local Lucene-equivalent filter
+    (rule 4) applied after retrieving posts from the API.
+    """
+    text = (str(post.get("title",    "")) + " " +
+            str(post.get("selftext", ""))).lower()
+    return any(kw.lower() in text for kw in keywords)
+
+
+def _is_stickied(post: dict) -> bool:
+    """Return True for pinned/stickied posts that should be skipped (rule 6)."""
+    return bool(
+        post.get("stickied") or
+        post.get("pinned")   or
+        post.get("is_pinned")
     )
-    
-    return {
-        "source": "arctic_shift_reddit",
+
+
+def _fetch_submissions(subreddit: str, before_ts: int = None) -> list:
+    """
+    GET /api/posts/search for one page of posts.
+
+    Applies rule 1 (sleep) and rule 2 (limit=100).
+    Uses `before` cursor for rule 3 pagination.
+
+    Returns:
+        List of post dicts, or [] on any error.
+    """
+    params = {
         "subreddit": subreddit,
-        "date_range": {"start": start_date, "end": end_date},
-        "posts_file": posts_file,
-        "comments_file": comments_file,
-        "scraped_at": datetime.now().isoformat(),
-        "status": "success"
+        "sort"     : "desc",
+        "limit"    : _MAX_LIMIT,
     }
+    if before_ts is not None:
+        params["before"] = before_ts
+
+    try:
+        r = requests.get(_POSTS_ENDPOINT, params=params, timeout=20)
+        time.sleep(_SLEEP)  # rule 1 — always throttle
+
+        if r.status_code == 200:
+            return r.json().get("data") or []
+
+        print(f"    Posts API {r.status_code}: {r.text[:120]}")
+        return []
+
+    except Exception as exc:
+        time.sleep(_SLEEP)
+        print(f"    Posts request error: {str(exc)[:120]}")
+        return []
+
+
+def _fetch_comments_chunk(link_id: str, before_ts: int = None) -> list:
+    """
+    GET /api/comments/search for one page of comments for a single post.
+
+    The API accepts exactly one base36 link_id per request (e.g. 't3_abc123').
+    Applies rule 1 (sleep) and rule 2 (limit=100).
+
+    Returns:
+        List of comment dicts, or [] on any error.
+    """
+    params = {
+        "link_id": link_id,
+        "sort"   : "desc",
+        "limit"  : _MAX_LIMIT,
+    }
+    if before_ts is not None:
+        params["before"] = before_ts
+
+    try:
+        r = requests.get(_COMMENTS_ENDPOINT, params=params, timeout=20)
+        time.sleep(_SLEEP)  # rule 1
+
+        if r.status_code == 200:
+            return r.json().get("data") or []
+
+        print(f"    Comments API {r.status_code}: {r.text[:120]}")
+        return []
+
+    except Exception as exc:
+        time.sleep(_SLEEP)
+        print(f"    Comments request error: {str(exc)[:120]}")
+        return []
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STEP 2 + 3 — MAIN SCRAPING FUNCTION
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def scrape_with_api(
+    subreddits   : list,
+    keywords     : list,
+    min_comments : int = _MIN_COMMENTS,
+) -> dict:
+    """
+    Collect Reddit comments by:
+      1. Scanning submissions backwards in time per subreddit (local keyword
+         filter applied after each 100-item page — rule 4).
+      2. Batching matched post IDs into chunks of 20 (rule 5) and pulling all
+         linked comments with cursor pagination (rule 3).
+
+    Stops as soon as `min_comments` valid comments are collected or the
+    MAX_LOOKBACK_WEEKS safety cap is hit.
+
+    Returns:
+        A result dict compatible with the downstream ProcessorAgent.
+    """
+    lucene_q     = _format_lucene_query(keywords)
+    all_comments = []
+    start_ts     = int(datetime.now().timestamp())
+
+    print(f"\n{'='*60}")
+    print(f"Arctic Shift API collection started")
+    print(f"  Subreddits : {subreddits}")
+    print(f"  Keywords   : {keywords}")
+    print(f"  Lucene q   : {lucene_q}")
+    print(f"  Target     : {min_comments} comments")
+    print(f"  Press Ctrl+C at any time to stop and keep collected data.")
+    print(f"{'='*60}")
+
+    try:
+        for subreddit in subreddits:
+            if len(all_comments) >= min_comments:
+                break
+
+            print(f"\n--- r/{subreddit} ---")
+
+            # ── STEP 2: Build matching post ID pool ─────────────────────────
+            matching_ids  = []
+            post_cursor   = start_ts
+            weeks_checked = 0
+
+            while len(matching_ids) < _POST_POOL_TARGET and weeks_checked < _MAX_LOOKBACK_WEEKS:
+                weeks_checked += 1
+                posts = _fetch_submissions(subreddit, before_ts=post_cursor)
+
+                if not posts:
+                    print(f"  [posts] No more posts — stopping r/{subreddit} scan")
+                    break
+
+                matched_this_page = 0
+                for post in posts:
+                    if _is_stickied(post):
+                        continue
+                    if _keyword_match(post, keywords):
+                        matching_ids.append("t3_" + post["id"])
+                        matched_this_page += 1
+
+                oldest_ts = min(p["created_utc"] for p in posts)
+                print(f"  [posts] page {weeks_checked}: {len(posts)} fetched, "
+                      f"{matched_this_page} matched | pool={len(matching_ids)} | "
+                      f"cursor={oldest_ts}")
+
+                post_cursor = oldest_ts
+
+                if len(posts) < _MAX_LIMIT:
+                    print(f"  [posts] Reached end of r/{subreddit} feed")
+                    break
+
+            if not matching_ids:
+                print(f"  No matching posts found in r/{subreddit}")
+                continue
+
+            # ── STEP 3: Fetch comments for matched posts (one post at a time) ─
+            print(f"\n  Fetching comments for {len(matching_ids)} matched posts...")
+
+            done = False
+            for post_num, link_id in enumerate(matching_ids, start=1):
+                if done:
+                    break
+
+                comment_cursor = None
+                page_num       = 0
+
+                while True:
+                    page_num += 1
+                    raw_comments = _fetch_comments_chunk(link_id, before_ts=comment_cursor)
+
+                    if not raw_comments:
+                        break
+
+                    added = 0
+                    for c in raw_comments:
+                        body = c.get("body", "")
+                        if body in ("[deleted]", "[removed]") or not body:
+                            continue
+                        all_comments.append({
+                            "text"      : body,
+                            "author"    : c.get("author",      ""),
+                            "score"     : c.get("score",        0),
+                            "created_at": str(c.get("created_utc", "")),
+                            "post_id"   : c.get("link_id",     ""),
+                        })
+                        added += 1
+
+                    print(f"  [comments] post {post_num}/{len(matching_ids)} "
+                          f"({link_id}), page {page_num}: {added} added | "
+                          f"total={len(all_comments)}")
+
+                    if len(all_comments) >= min_comments:
+                        print(f"\n  Target reached: {len(all_comments)} comments")
+                        done = True
+                        break
+
+                    if len(raw_comments) < _MAX_LIMIT:
+                        break
+
+                    comment_cursor = min(c["created_utc"] for c in raw_comments)
+
+    except KeyboardInterrupt:
+        print(f"\n\n  [STOPPED] Ctrl+C received — saving {len(all_comments)} collected comments.")
+
+    if len(all_comments) < min_comments and len(all_comments) > 0:
+        print(f"  Collected {len(all_comments)}/{min_comments} comments before stopping.")
+
+    return {
+        "subreddit"     : "+".join(subreddits),
+        "topic"         : "+".join(keywords),
+        "posts"         : [],
+        "comments"      : all_comments,
+        "posts_count"   : 0,
+        "comments_count": len(all_comments),
+        "target_reached": len(all_comments) >= min_comments,
+        "scraped_at"    : datetime.now().isoformat(),
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STEP 6 — EXPORT UTILITY
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def export_to_csv(result: dict, filepath: str) -> None:
+    """
+    Convert the scraper result's comments list to a deduplicated CSV file.
+
+    Args:
+        result   : dict returned by scrape_with_api
+        filepath : destination CSV path
+    """
+    comments = result.get("comments", [])
+    if not comments:
+        print(f"  No comments to export")
+        return
+
+    df = pd.DataFrame(comments)
+    df.drop_duplicates(subset=["text"], inplace=True)
+    df.to_csv(filepath, index=False, encoding="utf-8-sig")
+    print(f"  Exported {len(df)} rows to {filepath}")
