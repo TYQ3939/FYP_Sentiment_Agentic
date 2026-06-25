@@ -45,8 +45,7 @@ def process_scraping_job(job_id: str, topic: str, subreddits: List[str]):
         
         try:
             scraper = ScraperAgent()
-            subreddits_str = ", ".join(subreddits)
-            scraper_result = scraper.run(f"Collect data about {topic} from subreddits: {subreddits_str}")
+            scraper_result = scraper.run(f"Collect data about {topic}")
             
             if scraper_result.get("status") != "success":
                 raise Exception(f"Scraping failed: {scraper_result.get('error')}")
