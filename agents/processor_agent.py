@@ -23,17 +23,25 @@ class ProcessorAgent(BaseAgent):
             metadata = state.get("metadata", {})
             topic = metadata.get("topic", "")
             
-            # Step 1: Find and read filtered data files
-            self.log("Step 1: Loading filtered data files from data/filtered_data...")
-            
+            # Step 1: Find the filtered data file for this job
+            self.log("Step 1: Loading filtered data file from data/filtered_data...")
+
             filtered_data_dir = "./data/filtered_data"
-            
+
             if not os.path.exists(filtered_data_dir):
                 self.log(f"⚠️ Filtered data directory not found: {filtered_data_dir}")
                 return {"status": "warning", "message": "No filtered data directory found"}
-            
-            json_files = glob.glob(os.path.join(filtered_data_dir, "*_filtered.json"))
-            
+
+            # Prefer the exact path the ScraperAgent recorded for this job
+            saved_path = state.get("filtered_data_path", "")
+            if saved_path and os.path.exists(saved_path):
+                json_files = [saved_path]
+                self.log(f"Using job-specific file: {os.path.basename(saved_path)}")
+            else:
+                # Fallback: pick up any filtered file (legacy / manual runs)
+                json_files = glob.glob(os.path.join(filtered_data_dir, "*_filtered.json"))
+                self.log(f"No job path in state — found {len(json_files)} file(s) via glob")
+
             if not json_files:
                 self.log(f"⚠️ No filtered data files found in {filtered_data_dir}")
                 return {"status": "warning", "message": "No filtered data files found"}
@@ -129,28 +137,54 @@ class ProcessorAgent(BaseAgent):
                     # Step 4: Extract text for preprocessing
                     comment_texts = [c.get("text", "") for c in comments if c.get("text")]
                     post_texts = [p.get("text", "") for p in posts if p.get("text")]
-                    
+
                     self.log(f"   Text extracted: {len(comment_texts)} comment texts, {len(post_texts)} post texts")
-                    
+
                     if not comment_texts and not post_texts:
                         self.log(f"⚠️ No text content found in records")
                         continue
-                    
+
                     # Step 5: Preprocess for wordcloud and sentiment
                     self.log(f"   Preprocessing...")
-                    # Pass topic to wordcloud preprocessing for custom stopwords
-                    # NEW: Use separate sentiment preprocessing for BERTweet!
                     from tools.processor_tools import preprocess_for_sentiment_bertweet
-                    
+
                     wordcloud_comments = preprocess_wordcloud_with_pos_tagging(comment_texts, topic=topic, llm=self.llm)
                     wordcloud_posts = preprocess_wordcloud_with_pos_tagging(post_texts, topic=topic, llm=self.llm)
-                    
-                    # Use BERTWEET preprocessing for sentiment (preserves capitalization, punctuation)
-                    sentiment_comments = preprocess_for_sentiment_bertweet(comment_texts)
-                    sentiment_posts = preprocess_for_sentiment_bertweet(post_texts)
-                    
+
+                    # Preprocess one-at-a-time to keep created_at aligned with each text.
+                    # preprocess_for_sentiment_bertweet can filter out short/empty texts,
+                    # so batch processing breaks index alignment — per-item is the only safe way.
+                    sentiment_comment_pairs = []
+                    for c in comments:
+                        raw = c.get("text", "")
+                        if not raw:
+                            continue
+                        result_texts = preprocess_for_sentiment_bertweet([raw])
+                        if result_texts:
+                            sentiment_comment_pairs.append({
+                                "text"      : result_texts[0],
+                                "created_at": str(c.get("created_at", "")),
+                            })
+
+                    sentiment_post_pairs = []
+                    for p in posts:
+                        raw = p.get("text", "")
+                        if not raw:
+                            continue
+                        result_texts = preprocess_for_sentiment_bertweet([raw])
+                        if result_texts:
+                            sentiment_post_pairs.append({
+                                "text"      : result_texts[0],
+                                "created_at": str(p.get("created_at", "")),
+                            })
+
+                    sentiment_comments     = [x["text"] for x in sentiment_comment_pairs]
+                    comment_timestamps     = [x["created_at"] for x in sentiment_comment_pairs]
+                    sentiment_posts        = [x["text"] for x in sentiment_post_pairs]
+                    post_timestamps        = [x["created_at"] for x in sentiment_post_pairs]
+
                     self.log(f"   ✅ Preprocessing done: {len(wordcloud_comments)} wordcloud, {len(sentiment_comments)} sentiment")
-                    
+
                     # Step 6: Create processed item
                     processed_item = {
                         "subreddit": subreddit,
@@ -166,8 +200,10 @@ class ProcessorAgent(BaseAgent):
                                 "total_words": len(wordcloud_comments) + len(wordcloud_posts)
                             },
                             "sentiment": {
-                                "comments": sentiment_comments,
-                                "posts": sentiment_posts,
+                                "comments"          : sentiment_comments,
+                                "comment_timestamps": comment_timestamps,
+                                "posts"             : sentiment_posts,
+                                "post_timestamps"   : post_timestamps,
                                 "total_texts": len(sentiment_comments) + len(sentiment_posts)
                             }
                         },

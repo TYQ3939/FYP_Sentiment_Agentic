@@ -43,18 +43,23 @@ def generate_timeline_chart(sentiments: List[Dict], use_timestamps: bool = True)
             try:
                 # Extract date
                 timestamp = sentiment.get("created_at")
+                date = None
                 if timestamp:
                     if isinstance(timestamp, (int, float)):
+                        # Already a numeric Unix timestamp
                         date = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d")
                     else:
-                        date_str = str(timestamp)[:10]
+                        ts_str = str(timestamp).strip()
+                        # Try as Unix timestamp string (e.g. "1703123456")
                         try:
-                            datetime.strptime(date_str, "%Y-%m-%d")
-                            date = date_str
-                        except:
-                            date = None
-                else:
-                    date = None
+                            date = datetime.fromtimestamp(float(ts_str)).strftime("%Y-%m-%d")
+                        except (ValueError, OSError, OverflowError):
+                            # Fall back: try YYYY-MM-DD prefix
+                            try:
+                                datetime.strptime(ts_str[:10], "%Y-%m-%d")
+                                date = ts_str[:10]
+                            except ValueError:
+                                date = None
                 
                 # If no date, create synthetic date
                 if not date:
@@ -129,6 +134,14 @@ def generate_timeline_chart(sentiments: List[Dict], use_timestamps: bool = True)
             marker=dict(size=8)
         ))
         
+        # Force integer y-axis ticks — avoid "0 0 0 1 1 1" when counts are small
+        max_count = int(max(
+            grouped['positive'].max(),
+            grouped['neutral'].max(),
+            grouped['negative'].max(),
+        ))
+        y_dtick = max(1, max_count // 10)
+
         fig.update_layout(
             title="Sentiment Timeline (by Date) - Aggregated Daily Counts",
             xaxis_title="Date (YYYY-MM-DD)",
@@ -136,7 +149,12 @@ def generate_timeline_chart(sentiments: List[Dict], use_timestamps: bool = True)
             height=400,
             hovermode='x unified',
             xaxis_tickangle=-45,
-            yaxis=dict(tickformat="d")
+            yaxis=dict(
+                tickformat="d",
+                tick0=0,
+                dtick=y_dtick,
+                rangemode="tozero",
+            )
         )
         
         return fig

@@ -24,20 +24,10 @@ class VisualizationAgent(BaseAgent):
             
             topic = metadata.get("topic", "")
             
-            self.log("Generating aspect-level sentiment analysis...")
-            
-            from tools.visualization_tools import perform_aspect_level_sentiment_analysis
-            
-            detailed_sentiments = sentiment_results.get("detailed_sentiments", [])
-            aspect_analysis = perform_aspect_level_sentiment_analysis(
-                processed_data,
-                detailed_sentiments,
-                use_tech_aspects=True
-            )
-            
-            self.save_state("aspect_analysis", aspect_analysis)
-            
-            self.log(f"✅ Identified {len(aspect_analysis)} aspects for analysis")
+            # ABSA results are pre-computed by AnalystAgent — read from state
+            aspect_analysis = state.get("aspect_analysis", {})
+            self.log(f"✅ Loaded {len(aspect_analysis)} ABSA aspects from shared state: "
+                     f"{list(aspect_analysis.keys())}")
             
             # Prepare wordclouds with topic-aware filtering
             self.log("Preparing wordcloud data...")
