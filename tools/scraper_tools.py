@@ -55,13 +55,24 @@ def infer_topic_structure(topic: str, llm) -> dict:
 Return ONLY a JSON object with this exact schema:
 {{
     "subreddits": ["subreddit1", "subreddit2", "subreddit3"],
-    "keywords": ["keyword1", "keyword2", "keyword3"]
+    "keywords": ["keyword1", "keyword2", "keyword3", "keyword4"]
 }}
 
 Rules:
-- subreddits: TOP 3 most relevant active subreddits (without 'r/' prefix).
-- keywords: 2-4 lowercase keyword variations people would type when discussing
-  this topic (e.g. brand names, abbreviations, alternate spellings).
+- subreddits: TOP 3 most relevant, active subreddits (no 'r/' prefix).
+- keywords: 3-5 lowercase search terms real users type when discussing this topic.
+  Follow these keyword rules strictly:
+  1. ALWAYS include the full topic string (or its closest natural form) as the
+     first keyword.
+  2. If the topic contains a tier, version, edition, or spec qualifier
+     (e.g. "Pro Max", "Ultra", "Plus", "5G", "Gen 2", "S24+", "v2"),
+     EVERY keyword variation MUST preserve that qualifier — never drop it.
+     Example for "iPhone 17 Pro Max":
+       GOOD → ["iphone 17 pro max", "ip17 pro max", "iphone17 pro max", "apple iphone 17 pro max"]
+       BAD  → ["iphone17", "ip17", "apple iphone"]  ← these lose "pro max"
+  3. Include informal abbreviations ONLY if they still carry the full qualifier.
+  4. Broad parent-brand keywords (e.g. just "iphone", "samsung") are acceptable
+     as the LAST keyword only, for fallback coverage.
 
 Output ONLY the JSON object — no explanation."""
 
