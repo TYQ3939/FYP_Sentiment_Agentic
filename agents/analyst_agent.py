@@ -20,8 +20,12 @@ class AnalystAgent(BaseAgent):
         self.log("Starting sentiment analysis with GPU acceleration...")
         
         try:
-            # Import from tools.analyst_tools (correct location)
-            from tools.analyst_tools import analyze_sentiment_batch, get_device_info
+            from tools.analyst_tools import (
+                analyze_sentiment_batch,
+                get_device_info,
+                discover_aspects_kmeans_ctfidf,
+                verify_aspects_with_llm,
+            )
             
             # Log device info
             device_info = get_device_info()
@@ -40,13 +44,25 @@ class AnalystAgent(BaseAgent):
             
             self.log(f"Analyzing {len(processed_data)} data sources...")
             
-            # Aggregate all sentiment texts from processed data
+            # Aggregate texts AND timestamps together so the timeline chart
+            # can group by real date instead of falling back to synthetic dates.
             all_sentiment_texts = []
+            all_created_ats     = []
             for source in processed_data:
                 preprocessing = source.get("preprocessing", {})
                 sentiment_data = preprocessing.get("sentiment", {})
-                all_sentiment_texts.extend(sentiment_data.get("comments", []))
-                all_sentiment_texts.extend(sentiment_data.get("posts", []))
+
+                texts      = sentiment_data.get("comments", [])
+                timestamps = sentiment_data.get("comment_timestamps", [])
+                for i, text in enumerate(texts):
+                    all_sentiment_texts.append(text)
+                    all_created_ats.append(timestamps[i] if i < len(timestamps) else "")
+
+                texts      = sentiment_data.get("posts", [])
+                timestamps = sentiment_data.get("post_timestamps", [])
+                for i, text in enumerate(texts):
+                    all_sentiment_texts.append(text)
+                    all_created_ats.append(timestamps[i] if i < len(timestamps) else "")
             
             if not all_sentiment_texts:
                 self.log("⚠️ No texts available for sentiment analysis")
@@ -57,8 +73,10 @@ class AnalystAgent(BaseAgent):
             # Perform sentiment analysis with fine-tuned BERTweet on GPU
             sentiment_results = analyze_sentiment_batch(all_sentiment_texts)
             
-            # Aggregate statistics
+            # Attach real timestamps so the timeline chart can group by date
             sentiments = sentiment_results.get("sentiments", [])
+            for i, s in enumerate(sentiments):
+                s["created_at"] = all_created_ats[i] if i < len(all_created_ats) else ""
             
             positive_count = sum(1 for s in sentiments if s.get("label") == "positive")
             neutral_count = sum(1 for s in sentiments if s.get("label") == "neutral")
@@ -93,7 +111,28 @@ class AnalystAgent(BaseAgent):
             
             # Save sentiment analysis results
             self.save_state("sentiment_results", analysis_data)
-            
+
+            # ── ABSA: K-Means clustering + c-TF-IDF aspect discovery ──────────
+            self.log("Running unsupervised ABSA (K-Means + c-TF-IDF)...")
+            try:
+                raw_aspects = discover_aspects_kmeans_ctfidf(
+                    all_sentiment_texts,
+                    sentiments,
+                )
+                self.log(f"Raw ABSA aspects: {list(raw_aspects.keys())}")
+
+                # LLM verification: filter noise + polish labels for the topic
+                topic = state.get("metadata", {}).get("topic", "")
+                self.log("Running LLM verification layer on aspect labels...")
+                aspect_analysis = verify_aspects_with_llm(raw_aspects, topic, self.llm)
+
+                self.save_state("aspect_analysis", aspect_analysis)
+                self.log(f"✅ ABSA complete — {len(aspect_analysis)} final aspects: "
+                         f"{list(aspect_analysis.keys())}")
+            except Exception as absa_exc:
+                self.log(f"⚠️ ABSA failed (non-fatal): {str(absa_exc)[:120]}")
+                self.save_state("aspect_analysis", {})
+
             self.log(f"✅ Sentiment analysis complete")
             self.log(f"   Device: {device_info.get('device', 'UNKNOWN')}")
             self.log(f"   Total texts analyzed: {total}")
