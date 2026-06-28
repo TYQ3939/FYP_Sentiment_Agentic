@@ -439,41 +439,61 @@ elif st.session_state.current_tab == "results":
                     # ============ TAB 3: WORDCLOUD ============
                     with tabs[2]:
                         st.subheader("Word Frequency Analysis")
-                        st.info("☁️ Shows the most frequent words by sentiment")
-                        
+                        st.info("☁️ Shows the most frequent words by sentiment and word type (nouns, verbs, adjectives)")
+
                         try:
                             from tools.visualization_tools import generate_wordcloud_by_sentiment
-    
+
                             processed_data = results.get('state', {}).get('processed_data', [])
                             topic = visualization_data.get('topic', '')
-    
+
                             if processed_data:
-                                # Pass topic for custom stopwords
-                                wordclouds = generate_wordcloud_by_sentiment(analysis_data, processed_data, topic=topic)
-        
+                                with st.spinner("Generating wordclouds..."):
+                                    wordclouds = generate_wordcloud_by_sentiment(analysis_data, processed_data, topic=topic)
+
                                 if wordclouds:
-                                    # Display overall wordcloud
+                                    # Overall wordcloud at the top
                                     if "overall" in wordclouds:
                                         st.subheader("Overall Wordcloud")
-                                        st.image(wordclouds["overall"], use_column_width=True)
-            
-                                    # Display sentiment-specific wordclouds
+                                        st.image(wordclouds["overall"], use_container_width=True)
+
+                                    st.divider()
+
+                                    # POS filter
+                                    st.subheader("Wordcloud by Sentiment & Word Type")
+                                    pos_filter = st.radio(
+                                        "Filter by word type:",
+                                        ["Nouns", "Verbs", "Adjectives"],
+                                        horizontal=True,
+                                        key="wordcloud_pos_filter"
+                                    )
+                                    pos_key = {"Nouns": "noun", "Verbs": "verb", "Adjectives": "adj"}[pos_filter]
+
                                     col1, col2, col3 = st.columns(3)
-            
+
                                     with col1:
-                                        if "positive" in wordclouds:
-                                            st.subheader("😊 Positive")
-                                            st.image(wordclouds["positive"], use_column_width=True)
-            
+                                        key = f"positive_{pos_key}"
+                                        st.subheader("😊 Positive")
+                                        if key in wordclouds:
+                                            st.image(wordclouds[key], use_container_width=True)
+                                        else:
+                                            st.info("Not enough data")
+
                                     with col2:
-                                        if "neutral" in wordclouds:
-                                            st.subheader("😐 Neutral")
-                                            st.image(wordclouds["neutral"], use_column_width=True)
-            
+                                        key = f"neutral_{pos_key}"
+                                        st.subheader("😐 Neutral")
+                                        if key in wordclouds:
+                                            st.image(wordclouds[key], use_container_width=True)
+                                        else:
+                                            st.info("Not enough data")
+
                                     with col3:
-                                        if "negative" in wordclouds:
-                                            st.subheader("😞 Negative")
-                                            st.image(wordclouds["negative"], use_column_width=True)
+                                        key = f"negative_{pos_key}"
+                                        st.subheader("😞 Negative")
+                                        if key in wordclouds:
+                                            st.image(wordclouds[key], use_container_width=True)
+                                        else:
+                                            st.info("Not enough data")
                                 else:
                                     st.info("Could not generate wordclouds")
                             else:

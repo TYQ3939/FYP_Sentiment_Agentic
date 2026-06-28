@@ -23,142 +23,146 @@ warnings.filterwarnings('ignore')
 
 def generate_timeline_chart(sentiments: List[Dict], use_timestamps: bool = True) -> go.Figure:
     """
-    Generate timeline chart with PROPER AGGREGATION by date.
-    
-    Groups sentiments by date and creates daily trend lines.
-    Ensures readable visualization with aggregated daily counts.
+    Generate timeline chart with dynamic time resolution.
+
+    Chooses the grouping granularity (hourly / daily / weekly) based on
+    the actual span of the data so the chart stays readable even when all
+    comments were posted on the same day.
     """
-    
+
     if not sentiments:
         return None
-    
+
     try:
         from datetime import datetime, timedelta
         import pandas as pd
-        
-        # Step 1: Extract dates from sentiments
-        sentiment_records = []
-        
-        for sentiment in sentiments:
+
+        records = []
+
+        for s in sentiments:
             try:
-                # Extract date
-                timestamp = sentiment.get("created_at")
-                date = None
-                if timestamp:
-                    if isinstance(timestamp, (int, float)):
-                        # Already a numeric Unix timestamp
-                        date = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d")
-                    else:
-                        ts_str = str(timestamp).strip()
-                        # Try as Unix timestamp string (e.g. "1703123456")
+                ts = s.get("created_at")
+                dt = None
+                if ts:
+                    ts_str = str(ts).strip()
+                    try:
+                        dt = datetime.fromtimestamp(float(ts_str))
+                    except (ValueError, OSError, OverflowError):
                         try:
-                            date = datetime.fromtimestamp(float(ts_str)).strftime("%Y-%m-%d")
-                        except (ValueError, OSError, OverflowError):
-                            # Fall back: try YYYY-MM-DD prefix
+                            dt = datetime.strptime(ts_str[:16], "%Y-%m-%dT%H:%M")
+                        except ValueError:
                             try:
-                                datetime.strptime(ts_str[:10], "%Y-%m-%d")
-                                date = ts_str[:10]
+                                dt = datetime.strptime(ts_str[:10], "%Y-%m-%d")
                             except ValueError:
-                                date = None
-                
-                # If no date, create synthetic date
-                if not date:
-                    # Use position as synthetic date
-                    base_date = datetime.now()
-                    days_back = len(sentiment_records)
-                    synthetic_date = base_date - timedelta(days=days_back)
-                    date = synthetic_date.strftime("%Y-%m-%d")
-                
-                # Extract sentiment label
-                label = sentiment.get("label", "neutral")
-                
-                sentiment_records.append({
-                    "date": date,
-                    "sentiment": label
-                })
-            
+                                dt = None
+
+                if dt is None:
+                    # Spread synthetic entries across the past few days
+                    dt = datetime.now() - timedelta(minutes=len(records) * 10)
+
+                records.append({"dt": dt, "sentiment": s.get("label", "neutral")})
+
             except Exception as e:
-                print(f"Error parsing sentiment: {str(e)[:50]}")
+                print(f"Error parsing sentiment timestamp: {str(e)[:50]}")
                 continue
-        
-        if not sentiment_records:
+
+        if not records:
             return None
-        
-        # Step 2: Create DataFrame for aggregation
-        df = pd.DataFrame(sentiment_records)
-        
-        # Step 3: Convert date to datetime
-        df['date'] = pd.to_datetime(df['date'])
-        
-        # Step 4: Group by date and sentiment, count occurrences
-        grouped = df.groupby(['date', 'sentiment']).size().unstack(fill_value=0)
-        
-        # Ensure all sentiment columns exist
-        for sentiment in ['positive', 'neutral', 'negative']:
-            if sentiment not in grouped.columns:
-                grouped[sentiment] = 0
-        
-        # Step 5: Sort by date and reset index
-        grouped = grouped.sort_index()
-        grouped = grouped[['positive', 'neutral', 'negative']]  # Ensure correct column order
-        
-        # Step 6: Create plotly figure with aggregated data
-        dates = grouped.index.strftime("%Y-%m-%d").tolist()
-        
+
+        df = pd.DataFrame(records)
+
+        # Determine span of real data to pick granularity
+        dt_min = df["dt"].min()
+        dt_max = df["dt"].max()
+        span_hours = max((dt_max - dt_min).total_seconds() / 3600, 0)
+
+        if span_hours <= 48:
+            # Hourly buckets
+            df["period"] = df["dt"].apply(
+                lambda d: d.strftime("%m-%d %H:00")
+            )
+            title = "Sentiment Timeline (Hourly)"
+            xlabel = "Hour"
+            ylabel = "Count per Hour"
+        elif span_hours <= 24 * 90:
+            # Daily buckets
+            df["period"] = df["dt"].apply(lambda d: d.strftime("%Y-%m-%d"))
+            title = "Sentiment Timeline (Daily)"
+            xlabel = "Date"
+            ylabel = "Count per Day"
+        else:
+            # Weekly buckets — use Monday of each ISO week
+            df["period"] = df["dt"].apply(
+                lambda d: (d - timedelta(days=d.weekday())).strftime("%Y-%m-%d")
+            )
+            title = "Sentiment Timeline (Weekly)"
+            xlabel = "Week starting"
+            ylabel = "Count per Week"
+
+        grouped = df.groupby(["period", "sentiment"]).size().unstack(fill_value=0)
+
+        for col in ["positive", "neutral", "negative"]:
+            if col not in grouped.columns:
+                grouped[col] = 0
+
+        grouped = grouped.sort_index()[["positive", "neutral", "negative"]]
+        periods = grouped.index.tolist()
+
         fig = go.Figure()
-        
+
         fig.add_trace(go.Scatter(
-            x=dates,
-            y=grouped['positive'].astype(int),
-            mode='lines+markers',
-            name='Positive',
+            x=periods,
+            y=grouped["positive"].astype(int),
+            mode="lines+markers",
+            name="Positive",
             line=dict(color="#2ecc71", width=3),
-            marker=dict(size=8)
+            marker=dict(size=8),
         ))
-        
         fig.add_trace(go.Scatter(
-            x=dates,
-            y=grouped['neutral'].astype(int),
-            mode='lines+markers',
-            name='Neutral',
+            x=periods,
+            y=grouped["neutral"].astype(int),
+            mode="lines+markers",
+            name="Neutral",
             line=dict(color="#95a5a6", width=3),
-            marker=dict(size=8)
+            marker=dict(size=8),
         ))
-        
         fig.add_trace(go.Scatter(
-            x=dates,
-            y=grouped['negative'].astype(int),
-            mode='lines+markers',
-            name='Negative',
+            x=periods,
+            y=grouped["negative"].astype(int),
+            mode="lines+markers",
+            name="Negative",
             line=dict(color="#e74c3c", width=3),
-            marker=dict(size=8)
+            marker=dict(size=8),
         ))
-        
-        # Force integer y-axis ticks — avoid "0 0 0 1 1 1" when counts are small
+
         max_count = int(max(
-            grouped['positive'].max(),
-            grouped['neutral'].max(),
-            grouped['negative'].max(),
+            grouped["positive"].max(),
+            grouped["neutral"].max(),
+            grouped["negative"].max(),
         ))
         y_dtick = max(1, max_count // 10)
 
+        # Tilt x-axis labels only when there are many periods
+        n_periods = len(periods)
+        x_angle = -45 if n_periods > 12 else (-30 if n_periods > 6 else 0)
+
         fig.update_layout(
-            title="Sentiment Timeline (by Date) - Aggregated Daily Counts",
-            xaxis_title="Date (YYYY-MM-DD)",
-            yaxis_title="Count per Day",
-            height=400,
-            hovermode='x unified',
-            xaxis_tickangle=-45,
+            title=title,
+            xaxis_title=xlabel,
+            yaxis_title=ylabel,
+            height=420,
+            hovermode="x unified",
+            xaxis_tickangle=x_angle,
             yaxis=dict(
                 tickformat="d",
                 tick0=0,
                 dtick=y_dtick,
                 rangemode="tozero",
-            )
+            ),
         )
-        
+
         return fig
-    
+
     except Exception as e:
         print(f"Error in generate_timeline_chart: {str(e)}")
         return None
@@ -166,139 +170,165 @@ def generate_timeline_chart(sentiments: List[Dict], use_timestamps: bool = True)
 
 def generate_wordcloud_by_sentiment(sentiment_data: Dict, processed_data: List[Dict], topic: str = "") -> Dict[str, bytes]:
     """
-    Generate wordclouds with topic-aware custom stopwords filtering.
+    Generate wordclouds broken down by sentiment and POS type.
 
-    Args:
-        sentiment_data: Sentiment analysis results
-        processed_data: Processed data with preprocessing info
-        topic: Topic to filter from wordcloud
+    Text source strategy (most-to-least reliable):
+      1. Rebuild BERTweet-preprocessed texts from processed_data.preprocessing.sentiment
+         and match sentiment labels from detailed_sentiments by index.
+         These texts are ALWAYS full-length regardless of API payload truncation.
+      2. Fall back to detailed_sentiments[i].text if processed_data yields nothing.
 
-    Returns:
-        Dictionary with wordcloud images
+    Returns keys: "overall", "<sentiment>_noun", "<sentiment>_verb", "<sentiment>_adj"
     """
 
     try:
         from wordcloud import WordCloud
     except ImportError:
-        print("⚠️ WordCloud library not installed")
         return {}
+
+    import io
 
     wordclouds = {}
 
-    try:
-        # Create custom stopwords based on topic
-        custom_stops = set()
-        if topic:
-            # Use basic topic words as stopwords
-            topic_words = set(topic.lower().split())
-            custom_stops = topic_words
-            print(f"Using {len(custom_stops)} topic words as stopwords")
+    custom_stops = set(topic.lower().split()) if topic else set()
 
-        # Extract wordcloud texts from processed data
+    nlp_wc = None
+    try:
+        import spacy
+        nlp_wc = spacy.load("en_core_web_sm")
+    except Exception:
+        pass  # spaCy unavailable; fallback to regex tokenisation
+
+    POS_GROUPS = {
+        "noun": ["NOUN", "PROPN"],
+        "verb": ["VERB"],
+        "adj":  ["ADJ"],
+    }
+    COLORMAPS = {
+        "positive": "Greens",
+        "neutral":  "Blues",
+        "negative": "Reds",
+    }
+
+    def _render_wordcloud(text, colormap):
+        if not text or len(text.strip()) < 10:
+            return None
+        try:
+            wc = WordCloud(
+                width=800,
+                height=400,
+                background_color="white",
+                colormap=colormap,
+                prefer_horizontal=0.7,
+                min_font_size=10,
+                max_words=100,
+            ).generate(text)
+            fig = plt.figure(figsize=(10, 5))
+            ax = fig.add_subplot(111)
+            ax.imshow(wc, interpolation="bilinear")
+            ax.axis("off")
+            buf = io.BytesIO()
+            plt.savefig(buf, format="png", bbox_inches="tight", dpi=100)
+            plt.close(fig)
+            buf.seek(0)
+            return buf.getvalue()
+        except Exception:
+            return None
+
+    def _extract_pos_words(texts, pos_tags):
+        """POS-filter a list of texts and return a single space-joined token string."""
+        words = []
+        for text in texts:
+            if not text:
+                continue
+            clean = text.replace("HTTPURL", "").replace("@USER", "").strip()
+            if not clean:
+                continue
+            if nlp_wc:
+                try:
+                    doc = nlp_wc(clean)
+                    for token in doc:
+                        if (
+                            token.pos_ in pos_tags
+                            and not token.is_stop
+                            and token.is_alpha
+                            and len(token.lemma_) > 2
+                            and token.lemma_.lower() not in custom_stops
+                        ):
+                            words.append(token.lemma_.lower())
+                except Exception:
+                    pass
+            else:
+                # Fallback: no POS distinction — keep all meaningful alpha tokens
+                import re
+                for w in re.findall(r"[a-zA-Z]{3,}", clean.lower()):
+                    if w not in custom_stops:
+                        words.append(w)
+        return " ".join(words)
+
+    try:
+        detailed_sentiments = sentiment_data.get("detailed_sentiments", [])
+
+        # ── Strategy 1: rebuild full texts from processed_data + index-match labels ──
+        # processed_data.preprocessing.sentiment.comments are the BERTweet-preprocessed
+        # texts in the same order AnalystAgent used to produce detailed_sentiments.
+        all_sentiment_texts = []
+        for source in processed_data:
+            if not isinstance(source, dict):
+                continue
+            prep = source.get("preprocessing", {}).get("sentiment", {})
+            all_sentiment_texts.extend(prep.get("comments", []))
+            all_sentiment_texts.extend(prep.get("posts", []))
+
+        sentiment_texts_map = {"positive": [], "neutral": [], "negative": []}
+
+        if all_sentiment_texts and detailed_sentiments:
+            for idx, text in enumerate(all_sentiment_texts):
+                if idx < len(detailed_sentiments):
+                    label = detailed_sentiments[idx].get("label", "neutral")
+                else:
+                    break  # no more labels available
+                if label in sentiment_texts_map and text:
+                    sentiment_texts_map[label].append(text)
+
+        # ── Strategy 2: fall back to detailed_sentiments.text ──────────────────────
+        if not any(sentiment_texts_map.values()) and detailed_sentiments:
+            for s in detailed_sentiments:
+                label = s.get("label", "neutral")
+                text = s.get("text", "")
+                if text and label in sentiment_texts_map:
+                    sentiment_texts_map[label].append(text)
+
+        # ── Per-sentiment × per-POS wordclouds (9 total) ───────────────────────────
+        for sentiment in ["positive", "neutral", "negative"]:
+            texts = sentiment_texts_map.get(sentiment, [])
+            if not texts:
+                continue
+
+            colormap = COLORMAPS.get(sentiment, "viridis")
+
+            for pos_name, pos_tags in POS_GROUPS.items():
+                filtered_text = _extract_pos_words(texts, pos_tags)
+                img = _render_wordcloud(filtered_text, colormap)
+                if img:
+                    wordclouds[f"{sentiment}_{pos_name}"] = img
+
+        # ── Overall wordcloud from pre-processed NOUN/PROPN/ADJ lemma texts ────────
         all_wordcloud_texts = []
         for source in processed_data:
             if isinstance(source, dict):
-                preprocessing = source.get("preprocessing", {})
-                wordcloud_data = preprocessing.get("wordcloud", {})
-                all_wordcloud_texts.extend(wordcloud_data.get("comments", []))
-                all_wordcloud_texts.extend(wordcloud_data.get("posts", []))
+                prep = source.get("preprocessing", {}).get("wordcloud", {})
+                all_wordcloud_texts.extend(prep.get("comments", []))
+                all_wordcloud_texts.extend(prep.get("posts", []))
 
-        if not all_wordcloud_texts:
-            print("⚠️ No wordcloud texts available")
-            return {}
-
-        # Extract sentiment-specific texts
-        detailed_sentiments = sentiment_data.get("detailed_sentiments", [])
-        if not detailed_sentiments:
-            print("⚠️ No sentiment details available")
-            return {}
-
-        # Generate per-sentiment wordclouds
-        for sentiment in ["positive", "neutral", "negative"]:
-            sentiment_texts = [
-                s.get("text", "") for s in detailed_sentiments 
-                if s.get("label") == sentiment and s.get("text")
-            ]
-
-            if not sentiment_texts or len(" ".join(sentiment_texts)) < 20:
-                continue
-
-            text = " ".join(sentiment_texts)
-
-            try:
-                # Remove custom stopwords from text
-                words = text.split()
-                filtered_words = [w for w in words if w not in custom_stops]
-                filtered_text = " ".join(filtered_words)
-
-                if len(filtered_text.strip()) < 20:
-                    continue
-
-                wordcloud = WordCloud(
-                    width=800,
-                    height=400,
-                    background_color="white",
-                    colormap={"positive": "Greens", "neutral": "Blues", "negative": "Reds"}.get(sentiment, "viridis"),
-                    prefer_horizontal=0.7,
-                    min_font_size=10,
-                    max_words=100
-                ).generate(filtered_text)
-
-                fig = plt.figure(figsize=(10, 5))
-                ax = fig.add_subplot(111)
-                ax.imshow(wordcloud, interpolation='bilinear')
-                ax.axis('off')
-
-                import io
-                img_bytes = io.BytesIO()
-                plt.savefig(img_bytes, format='png', bbox_inches='tight', dpi=100)
-                plt.close(fig)
-                img_bytes.seek(0)
-
-                wordclouds[sentiment] = img_bytes.getvalue()
-                print(f"✅ Generated {sentiment} wordcloud")
-
-            except Exception as e:
-                print(f"⚠️ Error generating {sentiment} wordcloud: {str(e)[:80]}")
-                continue
-
-        # Generate overall wordcloud
-        try:
-            overall_text = " ".join(all_wordcloud_texts)
-            if len(overall_text.strip()) >= 20:
-                words = overall_text.split()
-                filtered_words = [w for w in words if w not in custom_stops]
-                filtered_text = " ".join(filtered_words)
-
-                if len(filtered_text.strip()) >= 20:
-                    wordcloud = WordCloud(
-                        width=800,
-                        height=400,
-                        background_color="white",
-                        prefer_horizontal=0.7,
-                        min_font_size=10,
-                        max_words=100
-                    ).generate(filtered_text)
-
-                    fig = plt.figure(figsize=(10, 5))
-                    ax = fig.add_subplot(111)
-                    ax.imshow(wordcloud, interpolation='bilinear')
-                    ax.axis('off')
-
-                    import io
-                    img_bytes = io.BytesIO()
-                    plt.savefig(img_bytes, format='png', bbox_inches='tight', dpi=100)
-                    plt.close(fig)
-                    img_bytes.seek(0)
-
-                    wordclouds["overall"] = img_bytes.getvalue()
-                    print(f"✅ Generated overall wordcloud")
-
-        except Exception as e:
-            print(f"⚠️ Error generating overall wordcloud: {str(e)[:80]}")
+        if all_wordcloud_texts:
+            overall_words = [w for w in " ".join(all_wordcloud_texts).split() if w not in custom_stops]
+            img = _render_wordcloud(" ".join(overall_words), "viridis")
+            if img:
+                wordclouds["overall"] = img
 
     except Exception as e:
-        print(f"Error in generate_wordcloud_by_sentiment: {str(e)}")
+        pass  # silently return whatever wordclouds were completed before the error
 
     return wordclouds
 
@@ -489,39 +519,52 @@ def perform_aspect_level_sentiment_analysis(processed_data: List[Dict],
 def generate_aspect_sentiment_chart(aspect_analysis: Dict) -> go.Figure:
     """
     Generate a grouped bar chart showing sentiment for each aspect.
-    Uses plotly only - no wordcloud dependency.
+    Tick angle adapts dynamically so labels are readable at any aspect count.
     """
-    
+
     if not aspect_analysis:
         return None
-    
+
     try:
         aspects = list(aspect_analysis.keys())[:10]
-        
+
         if not aspects:
             return None
-        
+
         positive_counts = [aspect_analysis[a]["positive"]["count"] for a in aspects]
-        neutral_counts = [aspect_analysis[a]["neutral"]["count"] for a in aspects]
+        neutral_counts  = [aspect_analysis[a]["neutral"]["count"]  for a in aspects]
         negative_counts = [aspect_analysis[a]["negative"]["count"] for a in aspects]
-        
+
         fig = go.Figure(data=[
-            go.Bar(name='Positive', x=aspects, y=positive_counts, marker_color='#2ecc71'),
-            go.Bar(name='Neutral', x=aspects, y=neutral_counts, marker_color='#95a5a6'),
-            go.Bar(name='Negative', x=aspects, y=negative_counts, marker_color='#e74c3c')
+            go.Bar(name="Positive", x=aspects, y=positive_counts, marker_color="#2ecc71"),
+            go.Bar(name="Neutral",  x=aspects, y=neutral_counts,  marker_color="#95a5a6"),
+            go.Bar(name="Negative", x=aspects, y=negative_counts, marker_color="#e74c3c"),
         ])
-        
+
+        # Dynamic tick angle: horizontal when few/short labels, tilt when crowded
+        n = len(aspects)
+        max_label_len = max(len(a) for a in aspects)
+        if n <= 4 and max_label_len <= 15:
+            tick_angle = 0
+        elif n <= 7 and max_label_len <= 20:
+            tick_angle = -30
+        else:
+            tick_angle = -45
+
+        # Taller chart when labels are tilted so they don't clip
+        chart_height = 420 if tick_angle == 0 else (460 if tick_angle == -30 else 500)
+
         fig.update_layout(
             title="Aspect-Level Sentiment Analysis",
             xaxis_title="Aspect",
             yaxis_title="Count",
-            barmode='group',
-            height=400,
-            xaxis_tickangle=-45
+            barmode="group",
+            height=chart_height,
+            xaxis_tickangle=tick_angle,
         )
-        
+
         return fig
-    
+
     except Exception as e:
         print(f"Error in generate_aspect_sentiment_chart: {str(e)}")
         return None
