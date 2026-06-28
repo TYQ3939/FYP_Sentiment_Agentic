@@ -242,11 +242,8 @@ def analyze_sentiment_batch(texts: List[str], batch_size: int = None) -> Dict:
                     label = label_map.get(pred_idx, "neutral")
                     confidence = float(prob[pred_idx])
                     
-                    # OPTIMIZATION: Store only first 50 chars of text to reduce payload
-                    text_preview = text[:50] if len(text) > 50 else text
-                    
                     sentiments.append({
-                        "text": text_preview,
+                        "text": text,
                         "label": label,
                         "confidence": confidence,
                         "scores": {

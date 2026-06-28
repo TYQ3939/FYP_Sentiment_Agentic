@@ -229,7 +229,42 @@ class ProcessorAgent(BaseAgent):
             # Step 8: Save to shared state
             self.log("Step 2: Saving processed data to shared state...")
             self.save_state("processed_data", processed_data)
-            
+
+            # Save processed output to file for inspection
+            try:
+                from datetime import datetime as _dt
+                topic_slug = topic.replace(" ", "_").replace("/", "_")[:60] if topic else "unknown"
+                processed_dir = "./data/processed_data"
+                os.makedirs(processed_dir, exist_ok=True)
+
+                export_sources = []
+                for item in processed_data:
+                    prep = item.get("preprocessing", {})
+                    export_sources.append({
+                        "subreddit": item.get("subreddit", ""),
+                        "topic": item.get("topic", ""),
+                        "total_comments": item.get("total_comments", 0),
+                        "total_posts": item.get("total_posts", 0),
+                        "wordcloud_comments": prep.get("wordcloud", {}).get("comments", []),
+                        "wordcloud_posts": prep.get("wordcloud", {}).get("posts", []),
+                        "sentiment_comments": prep.get("sentiment", {}).get("comments", []),
+                        "sentiment_comment_timestamps": prep.get("sentiment", {}).get("comment_timestamps", []),
+                        "sentiment_posts": prep.get("sentiment", {}).get("posts", []),
+                        "sentiment_post_timestamps": prep.get("sentiment", {}).get("post_timestamps", []),
+                    })
+
+                processed_export = {
+                    "topic": topic,
+                    "saved_at": _dt.now().isoformat(),
+                    "sources": export_sources,
+                }
+                processed_path = f"{processed_dir}/processed_{topic_slug}.json"
+                with open(processed_path, "w", encoding="utf-8") as _f:
+                    json.dump(processed_export, _f, indent=2, ensure_ascii=False)
+                self.log(f"✅ Saved processed data → {processed_path}")
+            except Exception as save_exc:
+                self.log(f"⚠️ Could not save processed file: {str(save_exc)[:100]}")
+
             # Calculate statistics
             total_posts = sum(item["total_posts"] for item in processed_data)
             total_comments = sum(item["total_comments"] for item in processed_data)
