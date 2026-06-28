@@ -16,8 +16,14 @@ shared_state.json
 jobs_db.json
 data/
 models/
+tools/models/
 logs/
 *.log
+
+# Generated output data
+data/filtered_data/
+data/processed_data/
+data/analysis/
 
 # IDE
 .vs/
