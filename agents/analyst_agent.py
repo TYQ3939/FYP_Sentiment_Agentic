@@ -37,6 +37,7 @@ class AnalystAgent(BaseAgent):
             # Load processed data from shared state
             state = self.load_state()
             processed_data = state.get("processed_data", [])
+            topic = state.get("metadata", {}).get("topic", "")
             
             if not processed_data:
                 self.log("⚠️ No processed data to analyze")
@@ -105,7 +106,7 @@ class AnalystAgent(BaseAgent):
                         "percentage": (negative_count / total * 100) if total > 0 else 0
                     }
                 },
-                "detailed_sentiments": sentiments[:100],  # Store first 100 for reference
+                "detailed_sentiments": sentiments,
                 "device_used": device_info.get("device", "UNKNOWN")
             }
             
@@ -122,7 +123,6 @@ class AnalystAgent(BaseAgent):
                 self.log(f"Raw ABSA aspects: {list(raw_aspects.keys())}")
 
                 # LLM verification: filter noise + polish labels for the topic
-                topic = state.get("metadata", {}).get("topic", "")
                 self.log("Running LLM verification layer on aspect labels...")
                 aspect_analysis = verify_aspects_with_llm(raw_aspects, topic, self.llm)
 
@@ -131,7 +131,45 @@ class AnalystAgent(BaseAgent):
                          f"{list(aspect_analysis.keys())}")
             except Exception as absa_exc:
                 self.log(f"⚠️ ABSA failed (non-fatal): {str(absa_exc)[:120]}")
+                aspect_analysis = {}
                 self.save_state("aspect_analysis", {})
+
+            # Save analysis outputs to files for inspection
+            try:
+                import os
+                from datetime import datetime as _dt
+                topic_slug = topic.replace(" ", "_").replace("/", "_")[:60] if topic else "unknown"
+                analysis_dir = "./data/analysis"
+                os.makedirs(analysis_dir, exist_ok=True)
+
+                # Sentiment results file (all comments with full text + label)
+                sentiment_export = {
+                    "topic": topic,
+                    "saved_at": _dt.now().isoformat(),
+                    "overall_sentiment": analysis_data["overall_sentiment"],
+                    "confidence": analysis_data["confidence"],
+                    "sentiment_distribution": analysis_data["sentiment_distribution"],
+                    "total_texts_analyzed": total,
+                    "detailed_sentiments": sentiments,
+                }
+                sentiment_path = f"{analysis_dir}/sentiment_{topic_slug}.json"
+                with open(sentiment_path, "w", encoding="utf-8") as _f:
+                    json.dump(sentiment_export, _f, indent=2, ensure_ascii=False)
+                self.log(f"✅ Saved sentiment results → {sentiment_path}")
+
+                # ABSA results file
+                absa_export = {
+                    "topic": topic,
+                    "saved_at": _dt.now().isoformat(),
+                    "aspects": aspect_analysis,
+                }
+                absa_path = f"{analysis_dir}/absa_{topic_slug}.json"
+                with open(absa_path, "w", encoding="utf-8") as _f:
+                    json.dump(absa_export, _f, indent=2, ensure_ascii=False)
+                self.log(f"✅ Saved ABSA results → {absa_path}")
+
+            except Exception as save_exc:
+                self.log(f"⚠️ Could not save analysis files: {str(save_exc)[:100]}")
 
             self.log(f"✅ Sentiment analysis complete")
             self.log(f"   Device: {device_info.get('device', 'UNKNOWN')}")
