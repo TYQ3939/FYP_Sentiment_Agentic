@@ -23,7 +23,7 @@ class AnalystAgent(BaseAgent):
             from tools.analyst_tools import (
                 analyze_sentiment_batch,
                 get_device_info,
-                discover_aspects_kmeans_ctfidf,
+                discover_aspects_bertopic,
                 verify_aspects_with_llm,
             )
             
@@ -35,9 +35,12 @@ class AnalystAgent(BaseAgent):
                 self.log(f"  - {key}: {value}")
             
             # Load processed data from shared state
-            state = self.load_state()
-            processed_data = state.get("processed_data", [])
-            topic = state.get("metadata", {}).get("topic", "")
+            state           = self.load_state()
+            processed_data  = state.get("processed_data", [])
+            meta            = state.get("metadata", {})
+            topic           = meta.get("topic",           "")
+            category        = meta.get("category",        "")
+            category_detail = meta.get("category_detail", "")
             
             if not processed_data:
                 self.log("⚠️ No processed data to analyze")
@@ -116,7 +119,7 @@ class AnalystAgent(BaseAgent):
             # ── ABSA: K-Means clustering + c-TF-IDF aspect discovery ──────────
             self.log("Running unsupervised ABSA (K-Means + c-TF-IDF)...")
             try:
-                raw_aspects = discover_aspects_kmeans_ctfidf(
+                raw_aspects = discover_aspects_bertopic(
                     all_sentiment_texts,
                     sentiments,
                 )
@@ -124,7 +127,11 @@ class AnalystAgent(BaseAgent):
 
                 # LLM verification: filter noise + polish labels for the topic
                 self.log("Running LLM verification layer on aspect labels...")
-                aspect_analysis = verify_aspects_with_llm(raw_aspects, topic, self.llm)
+                aspect_analysis = verify_aspects_with_llm(
+                    raw_aspects, topic, self.llm,
+                    category=category,
+                    category_detail=category_detail,
+                )
 
                 self.save_state("aspect_analysis", aspect_analysis)
                 self.log(f"✅ ABSA complete — {len(aspect_analysis)} final aspects: "

@@ -21,6 +21,23 @@ import plotly.express as px
 warnings.filterwarnings('ignore')
 
 
+def _nice_y_dtick(max_val: int, target_ticks: int = 8) -> int:
+    """
+    Return a 'round' tick interval so the y-axis shows clean values like
+    0, 10, 20, 30 rather than irregular steps from integer division.
+    Picks the smallest value from a human-readable set that gives at most
+    target_ticks tick marks for the given max value.
+    """
+    if max_val <= 0:
+        return 1
+    rough = max_val / target_ticks
+    nice_steps = [1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 5000, 10000]
+    for step in nice_steps:
+        if step >= rough:
+            return step
+    return nice_steps[-1]
+
+
 def generate_timeline_chart(sentiments: List[Dict], use_timestamps: bool = True) -> go.Figure:
     """
     Generate timeline chart with dynamic time resolution.
@@ -140,7 +157,8 @@ def generate_timeline_chart(sentiments: List[Dict], use_timestamps: bool = True)
             grouped["neutral"].max(),
             grouped["negative"].max(),
         ))
-        y_dtick = max(1, max_count // 10)
+        y_dtick   = _nice_y_dtick(max_count)
+        y_max     = max(y_dtick, (max_count // y_dtick + 1) * y_dtick)
 
         # Tilt x-axis labels only when there are many periods
         n_periods = len(periods)
@@ -157,7 +175,7 @@ def generate_timeline_chart(sentiments: List[Dict], use_timestamps: bool = True)
                 tickformat="d",
                 tick0=0,
                 dtick=y_dtick,
-                rangemode="tozero",
+                range=[0, y_max],
             ),
         )
 
@@ -168,7 +186,44 @@ def generate_timeline_chart(sentiments: List[Dict], use_timestamps: bool = True)
         return None
 
 
-def generate_wordcloud_by_sentiment(sentiment_data: Dict, processed_data: List[Dict], topic: str = "") -> Dict[str, bytes]:
+# Generic product/category self-reference words that tend to dominate
+# wordclouds without adding insight (e.g. "phone" for an "iPhone" topic,
+# "smartphone" pulled from category_detail). Added to the topic stopwords
+# whenever they appear as a substring of a topic/category token.
+_GENERIC_SELF_REF_WORDS = {
+    "phone", "smartphone", "device", "laptop", "tablet", "watch", "camera",
+    "app", "application", "game", "show", "movie", "series", "song", "album",
+    "car", "vehicle", "headphone", "headphones", "earbud", "earbuds",
+    "speaker", "console", "computer", "pc", "tv", "television",
+}
+
+
+def _build_topic_stopwords(topic: str = "", category_detail: str = "") -> set:
+    """
+    Build a dynamic stopword set from the topic + category description so
+    self-referential words (e.g. "phone" dominating an "iPhone 17 Pro Max"
+    wordcloud) don't drown out genuinely informative words.
+    """
+    import re as _re
+
+    tokens = set()
+    for source in (topic or "", category_detail or ""):
+        tokens.update(_re.findall(r"[a-z]+", source.lower()))
+
+    stops = set(tokens)
+    for generic in _GENERIC_SELF_REF_WORDS:
+        if any(generic in tok for tok in tokens):
+            stops.add(generic)
+
+    return stops
+
+
+def generate_wordcloud_by_sentiment(
+    sentiment_data: Dict,
+    processed_data: List[Dict],
+    topic: str = "",
+    category_detail: str = "",
+) -> Dict[str, bytes]:
     """
     Generate wordclouds broken down by sentiment and POS type.
 
@@ -190,7 +245,7 @@ def generate_wordcloud_by_sentiment(sentiment_data: Dict, processed_data: List[D
 
     wordclouds = {}
 
-    custom_stops = set(topic.lower().split()) if topic else set()
+    custom_stops = _build_topic_stopwords(topic, category_detail)
 
     nlp_wc = None
     try:
@@ -331,6 +386,57 @@ def generate_wordcloud_by_sentiment(sentiment_data: Dict, processed_data: List[D
         pass  # silently return whatever wordclouds were completed before the error
 
     return wordclouds
+
+
+def get_top_words_by_sentiment(
+    sentiment_data: Dict,
+    processed_data: List[Dict],
+    topic: str = "",
+    category_detail: str = "",
+    top_n: int = 12,
+) -> Dict[str, list]:
+    """
+    Compute the most frequent content words per sentiment bucket from the same
+    preprocessed NOUN/PROPN/ADJ lemma texts used to render the wordclouds, with
+    the same dynamic topic stopwords — but returns frequency counts instead of
+    rendered images. Used by the Advisor Agent to generate a genuine wordcloud
+    / word-frequency insight (instead of reusing ABSA aspect data as a proxy).
+
+    Returns: {"overall": [(word, count), ...], "positive": [...], "neutral": [...], "negative": [...]}
+    """
+    from collections import Counter
+
+    custom_stops = _build_topic_stopwords(topic, category_detail)
+    detailed_sentiments = sentiment_data.get("detailed_sentiments", [])
+
+    all_wordcloud_texts = []
+    for source in processed_data:
+        if isinstance(source, dict):
+            prep = source.get("preprocessing", {}).get("wordcloud", {})
+            all_wordcloud_texts.extend(prep.get("comments", []))
+            all_wordcloud_texts.extend(prep.get("posts", []))
+
+    buckets = {
+        "overall": Counter(), "positive": Counter(),
+        "neutral": Counter(), "negative": Counter(),
+    }
+
+    for idx, text in enumerate(all_wordcloud_texts):
+        if not text:
+            continue
+        words = [w for w in text.split() if w not in custom_stops and len(w) > 2]
+        if not words:
+            continue
+        buckets["overall"].update(words)
+        label = (
+            detailed_sentiments[idx].get("label", "neutral")
+            if idx < len(detailed_sentiments) else "neutral"
+        )
+        if label in buckets:
+            buckets[label].update(words)
+
+    return {key: counter.most_common(top_n) for key, counter in buckets.items()}
+
 
 def calculate_total_sentiment_coverage(aspect_analysis: Dict, total_sentiments: int) -> Dict:
     """
@@ -519,6 +625,11 @@ def perform_aspect_level_sentiment_analysis(processed_data: List[Dict],
 def generate_aspect_sentiment_chart(aspect_analysis: Dict) -> go.Figure:
     """
     Generate a grouped bar chart showing sentiment for each aspect.
+
+    "Others" (HDBSCAN noise cluster −1) is always shown last with muted bar
+    colours so it is visually distinct from named topic clusters.  A footnote
+    annotation is added explaining what it represents.
+
     Tick angle adapts dynamically so labels are readable at any aspect count.
     """
 
@@ -526,23 +637,37 @@ def generate_aspect_sentiment_chart(aspect_analysis: Dict) -> go.Figure:
         return None
 
     try:
-        aspects = list(aspect_analysis.keys())[:10]
+        # Named aspects (top 9) + Others always at the end
+        others_data   = aspect_analysis.get("Others")
+        named_aspects = [a for a in aspect_analysis if a != "Others"][:9]
+        aspects       = named_aspects + (["Others"] if others_data else [])
 
         if not aspects:
             return None
+
+        has_others = "Others" in aspects
+
+        # Per-bar colour lists: muted tones for the Others bar
+        _muted = {"#2ecc71": "#a8d5b5", "#95a5a6": "#cccccc", "#e74c3c": "#e8a8a3"}
+
+        def _colors(base: str) -> list:
+            return [_muted[base] if a == "Others" else base for a in aspects]
 
         positive_counts = [aspect_analysis[a]["positive"]["count"] for a in aspects]
         neutral_counts  = [aspect_analysis[a]["neutral"]["count"]  for a in aspects]
         negative_counts = [aspect_analysis[a]["negative"]["count"] for a in aspects]
 
         fig = go.Figure(data=[
-            go.Bar(name="Positive", x=aspects, y=positive_counts, marker_color="#2ecc71"),
-            go.Bar(name="Neutral",  x=aspects, y=neutral_counts,  marker_color="#95a5a6"),
-            go.Bar(name="Negative", x=aspects, y=negative_counts, marker_color="#e74c3c"),
+            go.Bar(name="Positive", x=aspects, y=positive_counts,
+                   marker_color=_colors("#2ecc71")),
+            go.Bar(name="Neutral",  x=aspects, y=neutral_counts,
+                   marker_color=_colors("#95a5a6")),
+            go.Bar(name="Negative", x=aspects, y=negative_counts,
+                   marker_color=_colors("#e74c3c")),
         ])
 
-        # Dynamic tick angle: horizontal when few/short labels, tilt when crowded
-        n = len(aspects)
+        # Dynamic tick angle
+        n             = len(aspects)
         max_label_len = max(len(a) for a in aspects)
         if n <= 4 and max_label_len <= 15:
             tick_angle = 0
@@ -551,17 +676,28 @@ def generate_aspect_sentiment_chart(aspect_analysis: Dict) -> go.Figure:
         else:
             tick_angle = -45
 
-        # Taller chart when labels are tilted so they don't clip
-        chart_height = 420 if tick_angle == 0 else (460 if tick_angle == -30 else 500)
+        chart_height  = 420 if tick_angle == 0 else (460 if tick_angle == -30 else 500)
+        bottom_margin = 80 if has_others else 40
 
         fig.update_layout(
             title="Aspect-Level Sentiment Analysis",
             xaxis_title="Aspect",
             yaxis_title="Count",
             barmode="group",
-            height=chart_height,
+            height=chart_height + (30 if has_others else 0),
             xaxis_tickangle=tick_angle,
+            margin=dict(b=bottom_margin),
         )
+
+        if has_others:
+            fig.add_annotation(
+                text="* Others: comments not assigned to any specific topic cluster (HDBSCAN noise, cluster −1)",
+                xref="paper", yref="paper",
+                x=0, y=-0.22,
+                showarrow=False,
+                font=dict(size=11, color="gray"),
+                align="left",
+            )
 
         return fig
 

@@ -49,6 +49,21 @@ def process_scraping_job(job_id: str, topic: str, subreddits: List[str]):
             
             if scraper_result.get("status") != "success":
                 raise Exception(f"Scraping failed: {scraper_result.get('error')}")
+
+            summary = scraper_result.get("summary", {})
+            if summary.get("comments", 0) == 0:
+                timed_out_flag = scraper_result.get("data", [{}])[0].get("timed_out", False) if scraper_result.get("data") else False
+                if timed_out_flag:
+                    raise Exception(
+                        "Scraping timed out after 10 minutes with no data collected. "
+                        "The topic may be too niche for these subreddits, or the API is slow. "
+                        "Please try again or use a broader topic."
+                    )
+                raise Exception(
+                    "No comments were collected. "
+                    "The topic may not have enough discussion in the selected subreddits. "
+                    "Please try a different or broader topic."
+                )
             
             print("✅ Scraping complete")
             print(f"   - Posts: {scraper_result.get('summary', {}).get('posts', 0)}")
