@@ -20,6 +20,19 @@ from datetime import datetime
 
 API_BASE_URL = "http://127.0.0.1:8000"
 
+
+@st.cache_data(show_spinner=False)
+def _cached_generate_wordclouds(job_id, _analysis_data, _processed_data, topic, category_detail=""):
+    """
+    Cache wordcloud generation per job so changing the noun/verb/adj filter
+    (a widget rerun) doesn't regenerate all 10 wordcloud images from scratch.
+    Args prefixed with "_" are excluded from Streamlit's cache-key hashing.
+    """
+    from tools.visualization_tools import generate_wordcloud_by_sentiment
+    return generate_wordcloud_by_sentiment(
+        _analysis_data, _processed_data, topic=topic, category_detail=category_detail
+    )
+
 # ========== PAGE CONFIG ==========
 
 st.set_page_config(
@@ -128,9 +141,8 @@ if st.session_state.current_tab == "main":
                 job_data = response.json()
                 job_id = job_data["job_id"]
                 st.session_state.current_job_id = job_id
-                
-                st.success(f"✅ Job started: `{job_id}`")
-                st.info("Polling for results... This may take several minutes.")
+
+                st.success("✅ Analysis started! Redirecting to progress page...")
                 
                 # Store start time
                 st.session_state.start_time = time.time()
@@ -151,103 +163,106 @@ if st.session_state.current_tab == "main":
 
 elif st.session_state.current_tab == "monitoring":
     if st.session_state.current_job_id:
-        st.header("📊 Job Monitoring")
-        
+        topic_display = st.session_state.current_topic or "your topic"
+        st.header(f"Analyzing: {topic_display}")
+
         job_id = st.session_state.current_job_id
-        
-        # Back button
-        if st.button("← Back to Input"):
+
+        if st.button("← Cancel / Back to Input"):
             st.session_state.current_tab = "main"
             st.rerun()
-        
+
         st.divider()
 
-        # Auto-refresh status with visual feedback
         job_status = None
         status_placeholder = st.empty()
 
         try:
             with status_placeholder.container():
-                st.info("🔄 Checking job status...")
-
+                st.info("Checking progress...")
             response = requests.get(f"{API_BASE_URL}/scrape/status/{job_id}", timeout=20)
-
-            status_placeholder.empty()  # Clear the loading message
-
+            status_placeholder.empty()
             if response.status_code == 200:
                 job_status = response.json()
         except requests.exceptions.Timeout:
-            status_placeholder.warning("⏱️ Request timeout - retrying automatically in 5 seconds...")
+            status_placeholder.warning("Connection slow — retrying in 5 seconds...")
             time.sleep(5)
             st.rerun()
         except requests.exceptions.ConnectionError:
-            status_placeholder.error("❌ Cannot connect to backend API. Make sure it's running:\n```bash\npython run_backend.py\n```")
+            status_placeholder.error("Cannot connect to the backend. Make sure it is running.")
         except Exception as e:
             status_placeholder.error(f"Error fetching status: {str(e)}")
-        
+
         if job_status:
-            # Progress indicator
-            col1, col2, col3 = st.columns([1, 2, 1])
-            
-            with col1:
-                st.metric("Progress", f"{job_status['progress']}%")
-            
-            with col2:
-                st.progress(job_status['progress'] / 100)
-            
-            with col3:
-                if job_status['status'] == "completed":
-                    st.success("✅ Complete")
-                elif job_status['status'] == "error":
-                    st.error("❌ Error")
-                elif job_status['status'] == "running":
-                    st.info("🔄 Running")
-                else:
-                    st.warning("⏳ Pending")
-            
-            # Job details
-            st.subheader("Job Details")
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                st.caption("Job ID")
-                st.code(job_id, language="")
-            
-            with col2:
-                st.caption("Status")
-                st.write(job_status['status'].upper())
-            
-            with col3:
-                st.caption("Created")
-                created_time = datetime.fromisoformat(job_status['created_at'])
-                st.write(created_time.strftime("%H:%M:%S"))
-            
+            progress = job_status.get('progress', 0)
+            status   = job_status.get('status', 'pending')
+
+            # ── Progress bar ──────────────────────────────────────────────────
+            st.progress(progress / 100)
+            st.caption(f"{progress}% complete")
+
             st.divider()
-            
-            # Results section
-            if job_status['status'] == "completed":
-                st.success("✅ Analysis Complete!")
-                
+
+            # ── Status-specific messaging ─────────────────────────────────────
+            if status == "completed":
+                st.success("Analysis complete!")
                 if st.button("View Results", type="primary"):
                     st.session_state.current_tab = "results"
                     st.session_state.analysis_complete = True
                     st.rerun()
-            
-            elif job_status['status'] == "error":
-                st.error(f"❌ Job Error: {job_status.get('error', 'Unknown error')}")
-            
-            else:
-                st.info("🔄 Job is still processing...")
-                
-                # Auto-refresh
-                if st.button("🔄 Refresh Now"):
+
+            elif status == "error":
+                st.error(f"Something went wrong: {job_status.get('error', 'Unknown error')}")
+                if st.button("← Try Again"):
+                    st.session_state.current_tab = "main"
                     st.rerun()
-                
-                st.write("Auto-refreshing in 5 seconds...")
+
+            else:
+                elapsed = time.time() - st.session_state.get("start_time", time.time())
+
+                started_at = ""
+                try:
+                    created_time = datetime.fromisoformat(job_status['created_at'])
+                    started_at   = f"Started at {created_time.strftime('%H:%M:%S')}."
+                except Exception:
+                    pass
+
+                # ── Taking too long? Show a soft warning after 12 minutes ──────
+                if elapsed > 720:
+                    st.warning(
+                        f"This is taking longer than expected (over 12 minutes). "
+                        f"The Reddit API may be slow right now, or **{topic_display}** "
+                        f"may not have enough recent discussion. "
+                        f"You can wait a little longer, or cancel and try a broader topic."
+                    )
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        if st.button("Wait & Refresh"):
+                            st.rerun()
+                    with col2:
+                        if st.button("Cancel & Try Again", type="primary"):
+                            st.session_state.current_tab = "main"
+                            st.rerun()
+                else:
+                    st.info(
+                        f"The AI agents are working on **{topic_display}**. "
+                        f"This typically takes 3–8 minutes depending on the amount of data. "
+                        f"{started_at}"
+                    )
+                    col1, col2 = st.columns([1, 3])
+                    with col1:
+                        if st.button("Refresh Now"):
+                            st.rerun()
+                    with col2:
+                        st.caption("Auto-refreshes every 5 seconds.")
+
                 time.sleep(5)
                 st.rerun()
     else:
-        st.warning("No job in progress. Go to the main tab to start a new analysis.")
+        st.warning("No analysis in progress. Go back to start a new one.")
+        if st.button("← Back"):
+            st.session_state.current_tab = "main"
+            st.rerun()
 
 # ========== RESULTS TAB (UPDATED) ==========
 
@@ -284,13 +299,45 @@ elif st.session_state.current_tab == "results":
                     st.divider()
                     
                     # Get analysis results
-                    analyst_results = results.get('analyst', {})
-                    advisor_results = results.get('advisor', {})
+                    analyst_results       = results.get('analyst', {})
+                    advisor_results       = results.get('advisor', {})
                     visualization_results = results.get('visualization', {})
-                    
-                    analysis_data = analyst_results.get('analysis', {})
+
+                    analysis_data      = analyst_results.get('analysis', {})
                     visualization_data = visualization_results.get('visualization_data', {})
+                    advisor_insights   = advisor_results.get('advisor_insights', {})
                     
+                    # ── Insight text styling helper ───────────────────────
+                    def _style_insight(text: str) -> str:
+                        """
+                        Post-process advisor insight text for richer Streamlit rendering.
+                        Converts **bold** markdown to HTML <strong> and adds colour
+                        spans for positive (green), negative (red) and neutral (grey)
+                        sentiment keywords.  Requires unsafe_allow_html=True.
+                        """
+                        import re
+                        # Convert **bold** → <strong>bold</strong> (reliable in HTML mode)
+                        text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
+                        # Colour positive-sentiment keywords green
+                        text = re.sub(
+                            r'\b(positive|positively|strength|strengths)\b',
+                            r'<span style="color:#27ae60;font-weight:600">\1</span>',
+                            text, flags=re.IGNORECASE
+                        )
+                        # Colour negative-sentiment keywords red
+                        text = re.sub(
+                            r'\b(negative|negatively|weakness|weaknesses|concern|concerning)\b',
+                            r'<span style="color:#e74c3c;font-weight:600">\1</span>',
+                            text, flags=re.IGNORECASE
+                        )
+                        # Colour neutral/mixed keywords grey
+                        text = re.sub(
+                            r'\b(neutral|mixed)\b',
+                            r'<span style="color:#7f8c8d;font-weight:600">\1</span>',
+                            text, flags=re.IGNORECASE
+                        )
+                        return text
+
                     # Display results in tabs
                     tabs = st.tabs([
                         "📊 Summary",
@@ -303,29 +350,29 @@ elif st.session_state.current_tab == "results":
                     # ============ TAB 1: SUMMARY ============
                     with tabs[0]:
                         st.subheader("Analysis Summary")
-                        
-                        # Key metrics
-                        col1, col2, col3, col4 = st.columns(4)
-                        
+
+                        # Topic — displayed as full-width text so long names are never cut off
+                        topic_label = visualization_data.get('topic', 'N/A')
+                        st.markdown(f"**Topic:** {topic_label}")
+
+                        st.divider()
+
+                        # Key metrics — 3 columns (Posts removed: always 0)
+                        col1, col2, col3 = st.columns(3)
+
                         with col1:
-                            st.metric(
-                                "Topic",
-                                visualization_data.get('topic', 'N/A')
-                            )
-                        
-                        with col2:
-                            st.metric(
-                                "Total Posts",
-                                visualization_data.get('total_posts', 0)
-                            )
-                        
-                        with col3:
                             st.metric(
                                 "Total Comments",
                                 visualization_data.get('total_comments', 0)
                             )
-                        
-                        with col4:
+
+                        with col2:
+                            st.metric(
+                                "Data Sources",
+                                f"{len(visualization_data.get('subreddits', []))} subreddits"
+                            )
+
+                        with col3:
                             sentiment = visualization_data.get('overall_sentiment', 'neutral').upper()
                             emoji = {"POSITIVE": "😊", "NEUTRAL": "😐", "NEGATIVE": "😞"}.get(sentiment, "❓")
                             st.metric(
@@ -401,7 +448,14 @@ elif st.session_state.current_tab == "results":
                         
                         except Exception as e:
                             st.error(f"Could not display chart: {str(e)}")
-                    
+
+                        # ── Advisor insight ──────────────────────────────────
+                        summary_insight = advisor_insights.get('summary', '')
+                        if summary_insight:
+                            st.divider()
+                            with st.expander("AI Advisor Insight", expanded=True):
+                                st.markdown(_style_insight(summary_insight), unsafe_allow_html=True)
+
                     # ============ TAB 2: TIMELINE ============
                     with tabs[1]:
                         st.subheader("Sentiment Timeline")
@@ -435,21 +489,29 @@ elif st.session_state.current_tab == "results":
                             st.info("Try running from project root: `streamlit run frontend/app.py`")
                         except Exception as e:
                             st.error(f"Error generating timeline: {str(e)}")
-                    
+
+                        # ── Advisor insight ──────────────────────────────────
+                        timeline_insight = advisor_insights.get('timeline', '')
+                        if timeline_insight:
+                            st.divider()
+                            with st.expander("AI Advisor Insight", expanded=True):
+                                st.markdown(_style_insight(timeline_insight), unsafe_allow_html=True)
+
                     # ============ TAB 3: WORDCLOUD ============
                     with tabs[2]:
                         st.subheader("Word Frequency Analysis")
                         st.info("☁️ Shows the most frequent words by sentiment and word type (nouns, verbs, adjectives)")
 
                         try:
-                            from tools.visualization_tools import generate_wordcloud_by_sentiment
-
-                            processed_data = results.get('state', {}).get('processed_data', [])
-                            topic = visualization_data.get('topic', '')
+                            processed_data  = results.get('state', {}).get('processed_data', [])
+                            topic           = visualization_data.get('topic', '')
+                            category_detail = visualization_data.get('category_detail', '')
 
                             if processed_data:
                                 with st.spinner("Generating wordclouds..."):
-                                    wordclouds = generate_wordcloud_by_sentiment(analysis_data, processed_data, topic=topic)
+                                    wordclouds = _cached_generate_wordclouds(
+                                        job_id, analysis_data, processed_data, topic, category_detail
+                                    )
 
                                 if wordclouds:
                                     # Overall wordcloud at the top
@@ -501,7 +563,14 @@ elif st.session_state.current_tab == "results":
 
                         except Exception as e:
                             st.error(f"Error generating wordclouds: {str(e)}")
-                    
+
+                        # ── Advisor insight ──────────────────────────────────
+                        wc_insight = advisor_insights.get('wordcloud', '')
+                        if wc_insight:
+                            st.divider()
+                            with st.expander("AI Advisor Insight", expanded=True):
+                                st.markdown(_style_insight(wc_insight), unsafe_allow_html=True)
+
                     # ============ TAB 4: ASPECT ANALYSIS ============
                     with tabs[3]:
                         st.subheader("Aspect-Level Sentiment Analysis")
@@ -526,127 +595,136 @@ elif st.session_state.current_tab == "results":
                                 if fig:
                                     st.plotly_chart(fig, width='stretch')
                                 
-                                # Display aspect details table
+                                # Display aspect details table — top 9 named + Others always at end
                                 st.subheader("Top Aspects")
-                                
+
+                                others_row  = aspect_analysis.get("Others")
+                                named_items = [(a, d) for a, d in aspect_analysis.items()
+                                               if a != "Others"][:9]
+                                table_items = named_items + ([("Others", others_row)]
+                                                             if others_row else [])
+
                                 aspect_list = []
-                                for aspect, data in list(aspect_analysis.items())[:10]:
+                                for aspect, data in table_items:
                                     aspect_list.append({
-                                        "Aspect": aspect.title(),
+                                        "Aspect"  : aspect.title(),
                                         "Positive": f"{data['positive']['percentage']:.1f}%",
-                                        "Neutral": f"{data['neutral']['percentage']:.1f}%",
+                                        "Neutral" : f"{data['neutral']['percentage']:.1f}%",
                                         "Negative": f"{data['negative']['percentage']:.1f}%",
                                         "Mentions": data['total_mentions']
                                     })
-                                
+
                                 st.dataframe(aspect_list, width='stretch')
                             else:
                                 st.info("No aspect analysis available")
-                        
+
                         except ImportError as e:
                             st.error(f"Import error: {str(e)}")
                             st.info("Try running from project root: `streamlit run frontend/app.py`")
                         except Exception as e:
                             st.error(f"Error displaying aspect analysis: {str(e)}")
-                    
+
+                        # ── Advisor ABSA insight ──────────────────────────────
+                        absa_insight = advisor_insights.get('absa_insight', '')
+                        if absa_insight:
+                            st.divider()
+                            with st.expander("AI Advisor Insight", expanded=True):
+                                st.markdown(_style_insight(absa_insight), unsafe_allow_html=True)
+
                     # ============ TAB 5: RECOMMENDATIONS & CHAT ============
                     with tabs[4]:
-                        st.subheader("Strategic Recommendations")
-                        
+                        st.subheader("AI Advisor — Full Analysis")
+
                         try:
-                            # Display aspect-based recommendations
-                            recommendations = advisor_results.get('recommendations', [])
-                            
-                            if recommendations:
-                                for i, rec in enumerate(recommendations, 1):
-                                    st.write(f"**{i}. {rec}**")
+                            # ── Section-by-section insights overview ─────────
+                            if advisor_insights:
+                                with st.expander("Overall Sentiment Insight", expanded=True):
+                                    st.markdown(_style_insight(advisor_insights.get('summary', '_Not available_')), unsafe_allow_html=True)
+
+                                with st.expander("Sentiment Timeline Insight", expanded=False):
+                                    st.markdown(_style_insight(advisor_insights.get('timeline', '_Not available_')), unsafe_allow_html=True)
+
+                                with st.expander("Discussion Theme Insight", expanded=False):
+                                    st.markdown(_style_insight(advisor_insights.get('wordcloud', '_Not available_')), unsafe_allow_html=True)
                             else:
-                                st.info("No recommendations available")
-                            
+                                st.info("Advisor insights not available for this job.")
+
                             st.divider()
 
-                            st.subheader("Suggested Questions")
-                            st.write("Click on a question or type your own:")
+                            # ── ABSA-based strategic recommendations ─────────
+                            st.subheader("Strategic Recommendations")
+                            recommendations = advisor_results.get('recommendations', [])
+                            if recommendations:
+                                for rec in recommendations:
+                                    st.markdown(_style_insight(rec), unsafe_allow_html=True)
+                            else:
+                                st.info("No strategic recommendations available.")
 
-                            # Get suggested questions
+                            st.divider()
+
+                            # ── Interactive chat ─────────────────────────────
+                            st.subheader("Ask a Question")
+
+                            if "chat_history" not in st.session_state:
+                                st.session_state.chat_history = []
+
+                            # Render conversation history
+                            for q, a in st.session_state.chat_history:
+                                with st.chat_message("user"):
+                                    st.write(q)
+                                with st.chat_message("assistant"):
+                                    st.write(a)
+
+                            # Chat input
+                            user_question = st.chat_input(
+                                "Ask anything about the analysis...",
+                                key=f"chat_input_{job_id}"
+                            )
+
+                            # ── Suggested questions (shown under the chat input) ──
                             suggested_questions = advisor_results.get('suggested_questions', [])
-
                             if suggested_questions:
-                                # Display as buttons
+                                st.caption("Or try one of these:")
                                 cols = st.columns(2)
                                 for idx, question in enumerate(suggested_questions):
-                                    col = cols[idx % 2]
-                                    with col:
-                                        if st.button(f"❓ {question}", width='stretch', key=f"suggested_{idx}"):
-                                            st.session_state.chat_history = []  # Reset chat
-                                            user_question = question
-                
+                                    with cols[idx % 2]:
+                                        if st.button(question, width='stretch', key=f"suggested_{idx}"):
+                                            if "chat_history" not in st.session_state:
+                                                st.session_state.chat_history = []
                                             with st.spinner("Thinking..."):
                                                 try:
                                                     from agents.advisor_agent import AdvisorAgent
                                                     advisor = AdvisorAgent()
-                                                    answer = advisor.answer_question(user_question)
-                                                    st.session_state.chat_history.append((user_question, answer))
+                                                    answer = advisor.answer_question(question)
+                                                    st.session_state.chat_history.append((question, answer))
                                                     st.rerun()
                                                 except Exception as e:
-                                                    st.error(f"Error: {str(e)[:100]}")
-                            
-                            # Initialize chat history if not exists
-                            if "chat_history" not in st.session_state:
-                                st.session_state.chat_history = []
-                            
-                            # Display chat history
-                            for question, answer in st.session_state.chat_history:
-                                with st.chat_message("user"):
-                                    st.write(question)
-                                with st.chat_message("assistant"):
-                                    st.write(answer)
-                            
-                            # Input for new question
-                            user_question = st.chat_input(
-                                "Ask a question about the analysis...",
-                                key=f"chat_input_{job_id}"
-                            )
-                            
+                                                    st.error(f"Error: {str(e)[:200]}")
+
                             if user_question:
-                                # Display user message
                                 with st.chat_message("user"):
                                     st.write(user_question)
-                                
-                                # Show thinking
                                 with st.chat_message("assistant"):
                                     with st.spinner("Thinking..."):
                                         try:
-                                            import sys
-                                            import os
-                                            
-                                            # Get the project root directory
-                                            project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                                            project_root = os.path.dirname(
+                                                os.path.dirname(os.path.abspath(__file__))
+                                            )
                                             if project_root not in sys.path:
                                                 sys.path.insert(0, project_root)
-                                            
+
                                             from agents.advisor_agent import AdvisorAgent
-                                            
                                             advisor = AdvisorAgent()
-                                            answer = advisor.answer_question(user_question)
-                                            
-                                            # Add to chat history
+                                            answer  = advisor.answer_question(user_question)
                                             st.session_state.chat_history.append((user_question, answer))
-                                            
-                                            # Display response
                                             st.write(answer)
-                                        
-                                        except ImportError as e:
-                                            error_msg = f"Import error: {str(e)}"
-                                            st.error(error_msg)
-                                            st.session_state.chat_history.append((user_question, error_msg))
                                         except Exception as e:
-                                            error_msg = f"Error answering question: {str(e)[:150]}"
-                                            st.error(error_msg)
-                                            st.session_state.chat_history.append((user_question, error_msg))
-                        
+                                            err = f"Error answering question: {str(e)[:200]}"
+                                            st.error(err)
+                                            st.session_state.chat_history.append((user_question, err))
+
                         except Exception as e:
-                            st.error(f"Error in recommendations tab: {str(e)}")
+                            st.error(f"Error in Recommendations tab: {str(e)}")
                 
                 else:
                     st.error("Results not available yet or job failed.")

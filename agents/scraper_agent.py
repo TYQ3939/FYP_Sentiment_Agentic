@@ -29,11 +29,14 @@ class ScraperAgent(BaseAgent):
             topic = self._extract_topic(user_request)
             self.log(f"Extracted topic: {topic}")
 
-            # Step 1 — LLM router: subreddits + keywords
-            self.log("Step 1: Structuring topic with LLM...")
-            structure  = infer_topic_structure(topic, self.llm)
-            subreddits = structure["subreddits"]
-            keywords   = structure["keywords"]
+            # Step 1 — LLM router: classify topic + pick the 5 best subreddits + keywords
+            self.log("Step 1: Classifying topic and selecting subreddits...")
+            structure        = infer_topic_structure(topic, self.llm)
+            subreddits       = structure["subreddits"]
+            keywords         = structure["keywords"]
+            category         = structure.get("category",        "")
+            category_detail  = structure.get("category_detail", "")
+            self.log(f"Category   : {category} - {category_detail}")
             self.log(f"Subreddits : {subreddits}")
             self.log(f"Keywords   : {keywords}")
 
@@ -58,6 +61,8 @@ class ScraperAgent(BaseAgent):
 
             self.save_state("metadata", {
                 "topic"             : topic,
+                "category"          : category,
+                "category_detail"   : category_detail,
                 "subreddits_scraped": subreddits,
                 "keywords_used"     : keywords,
                 "total_posts"       : 0,

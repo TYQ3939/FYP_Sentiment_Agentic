@@ -547,56 +547,304 @@ def discover_aspects_kmeans_ctfidf(texts: List[str], sentiments: List[Dict]) -> 
         return {}
 
 
-def verify_aspects_with_llm(raw_aspects: Dict, topic: str, llm) -> Dict:
+def discover_aspects_bertopic(texts: List[str], sentiments: List[Dict]) -> Dict:
+    """
+    BERTopic ABSA pipeline: all-MiniLM-L6-v2 embeddings → UMAP → HDBSCAN.
+
+    HDBSCAN labels documents that don't fit any cluster as topic -1.  These are
+    collected into an "Others" aspect so they remain visible in ABSA visuals.
+
+    Sentiment labels for each comment come from the fine-tuned BERTweet model
+    (the `sentiments` parameter is the output of analyze_sentiment_batch()).
+    BERTopic is used ONLY for clustering — it never re-predicts sentiment.
+
+    Each aspect in the returned dict includes a private "_top_words" key that
+    verify_aspects_with_llm() uses for better LLM prompting.  That key is
+    stripped before the dict is stored / displayed.
+
+    Falls back to discover_aspects_kmeans_ctfidf() if bertopic / umap-learn /
+    hdbscan are not installed.
+
+    Args:
+        texts:      Raw sentiment texts (parallel to `sentiments`).
+        sentiments: List of {"label": "positive"|"neutral"|"negative", ...}
+
+    Returns:
+        {"Aspect Label": {
+            "positive"      : {"count": N, "percentage": X},
+            "neutral"       : {"count": N, "percentage": X},
+            "negative"      : {"count": N, "percentage": X},
+            "total_mentions": N,
+            "_top_words"    : [str, ...]   # stripped by verify_aspects_with_llm
+        }, ...}
+        "Others" is always last (if HDBSCAN produced noise points).
+    """
+    import re
+
+    # Extra stopwords for social-media / Reddit noise not caught by sklearn's
+    # built-in English list (URLs already stripped by regex below).
+    _SM_STOP = {
+        "httpurl", "http", "https", "www", "com", "org", "amp", "gt", "lt",
+        "reddit", "subreddit", "post", "comment", "edit", "upvote", "downvote",
+        "like", "just", "get", "got", "would", "could", "should", "also",
+        "really", "think", "know", "make", "good", "one", "even", "still",
+        "thing", "things", "way", "use", "used", "lot", "much", "many",
+        "something", "someone", "anyone", "anything", "everything",
+        "people", "person", "everyone", "well", "need", "want", "see",
+        "new", "look", "going", "come", "time", "year", "day", "back",
+        "right", "say", "said", "dont", "doesnt", "didnt", "cant", "wont",
+        "ive", "im", "youre", "theyre", "thats", "heres", "whats", "yeah",
+        "yes", "no", "ok", "okay", "oh", "ah", "uh", "lol", "lmao",
+    }
+
+    def _is_content_keyword(w: str) -> bool:
+        """Return True for a meaningful unigram or bigram BERTopic keyword."""
+        parts = w.split()
+        if not parts:
+            return False
+        # All parts must be alphabetic and not in our stop sets
+        return (
+            all(p.isalpha() and len(p) > 2 and p.lower() not in _SM_STOP
+                for p in parts)
+        )
+
+    # ── Phase 1: clean + filter ───────────────────────────────────────────────
+    def _clean(t: str) -> str:
+        t = re.sub(r'r/\w+', '', t)
+        t = re.sub(r'u/\w+', '', t)
+        t = re.sub(r'https?\S+|www\.\S+', '', t)
+        t = re.sub(r'[^\w\s]', ' ', t)
+        # Remove standalone digits (version numbers kept via context)
+        t = re.sub(r'\b\d+\b', ' ', t)
+        return re.sub(r'\s+', ' ', t).strip()
+
+    clean_texts, clean_sents = [], []
+    for raw, sent in zip(texts, sentiments):
+        c = _clean(raw)
+        if len(c.split()) >= 4:
+            clean_texts.append(c)
+            clean_sents.append(sent)
+
+    MIN_DOCS = 10
+    if len(clean_texts) < MIN_DOCS:
+        print(f"  [ABSA] Only {len(clean_texts)} usable texts (need {MIN_DOCS}) — skipping")
+        return {}
+
+    try:
+        from sentence_transformers import SentenceTransformer
+        from bertopic import BERTopic
+        from umap import UMAP
+        from hdbscan import HDBSCAN
+        from sklearn.feature_extraction.text import CountVectorizer
+        from collections import defaultdict
+
+        # ── Phase 2: embed with all-MiniLM-L6-v2 ────────────────────────────
+        print(f"  [ABSA-BERTopic] Encoding {len(clean_texts)} docs with all-MiniLM-L6-v2...")
+        embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+        embeddings = embedding_model.encode(
+            clean_texts, show_progress_bar=False, batch_size=64
+        )
+
+        # ── Phase 3+4: UMAP → HDBSCAN via BERTopic ───────────────────────────
+        n = len(clean_texts)
+        min_cluster_size = max(5, min(20, n // 20))
+
+        umap_model = UMAP(
+            n_neighbors=min(15, n - 1),
+            n_components=5,
+            metric="cosine",
+            random_state=42,
+            low_memory=True,
+        )
+        hdbscan_model = HDBSCAN(
+            min_cluster_size=min_cluster_size,
+            min_samples=3,
+            metric="euclidean",
+            cluster_selection_method="eom",
+            prediction_data=True,
+        )
+
+        # CountVectorizer with English stopwords prevents function/stopwords
+        # from dominating the c-TF-IDF topic representations.
+        # ngram_range=(1,2) allows bigrams like "battery life", "camera quality".
+        vectorizer_model = CountVectorizer(
+            stop_words="english",
+            min_df=2,
+            ngram_range=(1, 2),
+            max_features=5000,
+        )
+
+        topic_model = BERTopic(
+            embedding_model=embedding_model,
+            umap_model=umap_model,
+            hdbscan_model=hdbscan_model,
+            vectorizer_model=vectorizer_model,
+            verbose=False,
+        )
+
+        print(f"  [ABSA-BERTopic] Fitting (min_cluster_size={min_cluster_size})...")
+        topics, _ = topic_model.fit_transform(clean_texts, embeddings=embeddings)
+
+        # ── Phase 5: build raw labels with top-keyword metadata ───────────────
+        cluster_indices: Dict[int, List[int]] = defaultdict(list)
+        for idx, tid in enumerate(topics):
+            cluster_indices[tid].append(idx)
+
+        # Build mapping: topic_id → (label_string, top_words_list)
+        topic_labels: Dict[int, tuple] = {}
+        for tid in sorted(cluster_indices.keys()):
+            if tid == -1:
+                topic_labels[-1] = ("Others", [])
+                continue
+            word_score_pairs = topic_model.get_topic(tid) or []
+            # Filter to meaningful content words / bigrams only
+            words = [
+                w for w, _ in word_score_pairs
+                if isinstance(w, str) and _is_content_keyword(w)
+            ][:8]
+            # Use best keyword as the raw label (LLM will rename it anyway)
+            label = words[0].title() if words else f"Topic {tid}"
+            topic_labels[tid] = (label, words)
+
+        # ── Phase 6: aggregate BERTweet sentiment counts per cluster ──────────
+        aspect_analysis: Dict = {}
+        for tid, indices in cluster_indices.items():
+            label, top_words = topic_labels.get(tid, (f"Topic {tid}", []))
+            pos   = sum(1 for i in indices if clean_sents[i].get("label") == "positive")
+            neu   = sum(1 for i in indices if clean_sents[i].get("label") == "neutral")
+            neg   = sum(1 for i in indices if clean_sents[i].get("label") == "negative")
+            total = len(indices)
+            if total == 0:
+                continue
+            aspect_analysis[label] = {
+                "positive"      : {"count": pos, "percentage": pos / total * 100},
+                "neutral"       : {"count": neu, "percentage": neu / total * 100},
+                "negative"      : {"count": neg, "percentage": neg / total * 100},
+                "total_mentions": total,
+                "_top_words"    : top_words,
+            }
+            print(f"  [ABSA-BERTopic] Cluster {tid} -> '{label}'  "
+                  f"({total} docs, top: {top_words[:4]})")
+
+        # Sort named aspects by mention count; keep Others at the end
+        others_data = aspect_analysis.pop("Others", None)
+        sorted_aspects = dict(
+            sorted(aspect_analysis.items(), key=lambda x: -x[1]["total_mentions"])
+        )
+        if others_data:
+            sorted_aspects["Others"] = others_data
+
+        n_named = len(sorted_aspects) - (1 if others_data else 0)
+        print(f"  [ABSA-BERTopic] Done: {n_named} topic clusters + "
+              f"{'Others (' + str(others_data['total_mentions']) + ' docs)' if others_data else 'no noise'}")
+        return sorted_aspects
+
+    except ImportError as ie:
+        print(f"  [ABSA-BERTopic] Missing package: {ie}")
+        print(f"  [ABSA-BERTopic] Install with: pip install bertopic umap-learn hdbscan")
+        print(f"  [ABSA-BERTopic] Falling back to K-Means + c-TF-IDF...")
+        return discover_aspects_kmeans_ctfidf(texts, sentiments)
+
+    except Exception as exc:
+        import traceback
+        print(f"  [ABSA-BERTopic] Failed: {exc}")
+        print(traceback.format_exc())
+        print(f"  [ABSA-BERTopic] Falling back to K-Means + c-TF-IDF...")
+        return discover_aspects_kmeans_ctfidf(texts, sentiments)
+
+
+def verify_aspects_with_llm(
+    raw_aspects     : Dict,
+    topic           : str,
+    llm,
+    category        : str = "",
+    category_detail : str = "",
+) -> Dict:
     """
     LLM verification layer for ABSA aspect labels.
 
-    Passes the raw K-Means/c-TF-IDF labels to the LLM along with the user
-    topic so it can:
-      1. Remove noise labels that are not meaningful aspects of the topic
-         (grammatical patterns, generic words, off-topic clusters, etc.)
-      2. Polish the remaining labels into a clean "Noun & Noun" Title Case
-         format that is semantically relevant to the topic.
+    Works with both BERTopic output (which includes "_top_words" per aspect)
+    and the legacy K-Means output (no "_top_words").
 
-    Duplicate new labels are merged (their sentiment counts are summed).
+    Behaviour:
+      - "Others" is always preserved as-is and is never sent to the LLM for
+        renaming, so uncategorised HDBSCAN noise is always visible in visuals.
+      - For each remaining label the LLM either polishes it into a concise
+        1-3 word Title Case phrase (no "&") or marks it for removal (null).
+        When BERTopic top-keywords are present they are included in the prompt
+        so the LLM has richer context.
+      - Duplicate polished labels are merged (sentiment counts are summed).
+      - "_top_words" is stripped from every entry before returning.
 
     Args:
-        raw_aspects: Dict returned by discover_aspects_kmeans_ctfidf()
-        topic:       The original user topic string (e.g. "iPhone 17 Pro Max")
-        llm:         Initialised LangChain LLM instance
+        raw_aspects: Dict returned by discover_aspects_bertopic() or
+                     discover_aspects_kmeans_ctfidf().
+        topic:       The original user topic string (e.g. "iPhone 17 Pro Max").
+        llm:         Initialised LangChain LLM instance.
 
     Returns:
-        Cleaned aspect dict with the same sentiment structure as raw_aspects.
-        Falls back to raw_aspects unchanged if the LLM call fails.
+        Cleaned aspect dict.  Falls back to raw_aspects (minus "_top_words")
+        if the LLM call fails.  "Others" is always last.
     """
     if not raw_aspects or not topic:
-        return raw_aspects
+        return _strip_top_words(raw_aspects)
+
+    # ── Separate "Others" — never sent to LLM ────────────────────────────────
+    others_data = raw_aspects.pop("Others", None)
+
+    if not raw_aspects:
+        result = {}
+        if others_data:
+            others_clean = {k: v for k, v in others_data.items() if k != "_top_words"}
+            result["Others"] = others_clean
+        return result
 
     raw_labels = list(raw_aspects.keys())
 
+    # ── Build label list with top-keywords for the LLM prompt ────────────────
+    label_lines = []
+    for label in raw_labels:
+        words = raw_aspects[label].get("_top_words", [])
+        if words:
+            label_lines.append(f'  "{label}"  (keywords: {", ".join(words[:6])})')
+        else:
+            label_lines.append(f'  "{label}"')
+
+    # Build optional topic-type context line for the prompt
+    _type_line = ""
+    if category:
+        _type_line = f"\nTopic type: {category}"
+        if category_detail:
+            _type_line += f" ({category_detail})"
+
     prompt = f"""You are an expert in Aspect-Based Sentiment Analysis (ABSA).
 
-Topic / Product being analysed: "{topic}"
+Topic / Product being analysed: "{topic}"{_type_line}
 
-The following aspect category labels were produced automatically by a K-Means
-clustering and c-TF-IDF pipeline applied to Reddit comments about this topic:
-{raw_labels}
+The following aspect category labels were produced automatically by BERTopic
+(UMAP + HDBSCAN) applied to Reddit comments about this topic.
+Each label is followed by its top representative keywords from the cluster:
+
+{chr(10).join(label_lines)}
 
 Your job — for each label decide ONE of two actions:
 
 A) KEEP & POLISH — the label represents a real, meaningful aspect of "{topic}".
-   Rewrite it as exactly two meaningful nouns joined by " & " in Title Case.
-   The nouns should be specific, topic-relevant, and self-explanatory to a reader.
-   Examples of good labels: "Battery & Charging", "Camera & Video", "Price & Value",
-   "Screen & Display", "Software & Performance", "Build & Design".
+   Use the keywords AND the topic type to identify the single most specific,
+   relevant concept users are discussing.  Rewrite as ONE short phrase of 1-3
+   words in Title Case — NO ampersand (&), NO slash, NO comma.
+   Choose aspect names that make sense for the topic type.  Examples:
+     • Consumer Electronics / Phone  → "Battery Life", "Camera Quality", "Display", "Performance", "Pricing", "Build Quality"
+     • Software / App / Game         → "User Interface", "Performance", "Bugs", "Pricing", "Content", "Updates"
+     • Person / Celebrity            → "Music", "Live Shows", "Personality", "Controversies", "Collaborations"
+     • Movie / TV Show               → "Plot", "Acting", "Visual Effects", "Characters", "Soundtrack", "Pacing"
+     • Company / Brand               → "Customer Service", "Product Quality", "Pricing", "Brand Image", "Shipping"
 
-B) REMOVE — the label is noise: it is grammatical, off-topic, too generic, or
-   clearly not a product/service aspect (e.g. "Punctuation & Sentences",
-   "Standoffish & Rude", "Record & Cameras" for a phone review context would be
-   polished or removed depending on relevance).
+B) REMOVE — the cluster is noise: grammatical fragments, off-topic chatter,
+   or too generic to be a useful product/service aspect.  Return null.
 
-Return ONLY a valid JSON object mapping every original label to either its
-polished replacement string or null (for removal):
+Return ONLY a valid JSON object mapping every original label to its polished
+string or null:
 {{
   "Original Label 1": "Polished Label",
   "Original Label 2": null,
@@ -605,33 +853,33 @@ polished replacement string or null (for removal):
 
 Rules:
 - Map EVERY label from the input list — do not skip any.
-- Two different original labels may map to the same polished label if they
-  represent the same aspect (they will be merged automatically).
+- Two different labels may map to the same polished label (they are merged).
+- Be conservative: keep aspects even if uncertain; only remove clear noise.
 - Output ONLY the JSON object — no explanation, no markdown."""
 
     try:
-        print(f"  [ABSA-LLM] Verifying {len(raw_labels)} aspect labels for topic '{topic}'...")
+        print(f"  [ABSA-LLM] Verifying {len(raw_labels)} labels for '{topic}'...")
         response = llm.invoke(prompt)
         text     = response.content if hasattr(response, "content") else str(response)
 
         start = text.find("{")
         end   = text.rfind("}") + 1
         if start == -1 or end <= start:
-            print("  [ABSA-LLM] Could not parse LLM response — keeping raw aspects")
-            return raw_aspects
+            print("  [ABSA-LLM] Could not parse JSON — keeping raw aspects")
+            result = _strip_top_words(raw_aspects)
+            if others_data:
+                result["Others"] = {k: v for k, v in others_data.items() if k != "_top_words"}
+            return result
 
         mapping: dict = json.loads(text[start:end])
 
-        # Rebuild aspect dict using the verified labels
+        # Rebuild dict with polished labels; merge duplicates
         verified: Dict = {}
         for old_label, new_label in mapping.items():
             if old_label not in raw_aspects or new_label is None:
-                continue  # removed
-
+                continue
             data = raw_aspects[old_label]
-
             if new_label in verified:
-                # Merge duplicate new labels
                 for sentiment in ("positive", "neutral", "negative"):
                     verified[new_label][sentiment]["count"] += data[sentiment]["count"]
                 verified[new_label]["total_mentions"] += data["total_mentions"]
@@ -643,21 +891,36 @@ Rules:
                     "total_mentions": data["total_mentions"],
                 }
 
-        # Recalculate percentages after potential merges
+        # Recalculate percentages after merges
         for _, data in verified.items():
             total = data["total_mentions"]
             if total > 0:
                 for sentiment in ("positive", "neutral", "negative"):
                     data[sentiment]["percentage"] = data[sentiment]["count"] / total * 100
 
+        # Sort named aspects, then re-add Others at the end
         result = dict(sorted(verified.items(), key=lambda x: -x[1]["total_mentions"]))
-        print(f"  [ABSA-LLM] Verified: {len(raw_labels)} raw → {len(result)} final aspects: "
+        if others_data:
+            result["Others"] = {k: v for k, v in others_data.items() if k != "_top_words"}
+
+        print(f"  [ABSA-LLM] {len(raw_labels)} raw -> {len(result)} final aspects: "
               f"{list(result.keys())}")
         return result
 
     except Exception as exc:
         print(f"  [ABSA-LLM] Verification failed ({str(exc)[:100]}) — keeping raw aspects")
-        return raw_aspects
+        result = _strip_top_words(raw_aspects)
+        if others_data:
+            result["Others"] = {k: v for k, v in others_data.items() if k != "_top_words"}
+        return result
+
+
+def _strip_top_words(aspects: Dict) -> Dict:
+    """Remove the private '_top_words' key from every aspect entry."""
+    return {
+        label: {k: v for k, v in data.items() if k != "_top_words"}
+        for label, data in aspects.items()
+    }
 
 
 def prepare_for_aspect_analysis(texts: List[str]) -> Dict:
