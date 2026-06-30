@@ -34,6 +34,8 @@ class VisualizationAgent(BaseAgent):
             
             visualization_data = {
                 "topic": metadata.get("topic", "Unknown"),
+                "category": metadata.get("category", ""),
+                "category_detail": metadata.get("category_detail", ""),
                 "total_posts": metadata.get("total_posts", 0),
                 "total_comments": metadata.get("total_comments", 0),
                 "subreddits": metadata.get("subreddits_scraped", []),

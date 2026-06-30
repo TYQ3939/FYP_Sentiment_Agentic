@@ -33,9 +33,10 @@ _SLEEP            = 1.5    # seconds between every request  (rule 1)
 _MAX_LIMIT        = 100    # items per request               (rule 2)
 
 # ─── Collection parameters ─────────────────────────────────────────────────────
-_MIN_COMMENTS     = 500
-_MAX_LOOKBACK_WEEKS = 24   # safety cap on outer loop
-_POST_POOL_TARGET = 50     # minimum matching posts before fetching comments
+_MIN_COMMENTS       = 500
+_MAX_LOOKBACK_WEEKS = 24    # safety cap on outer loop
+_POST_POOL_TARGET   = 50    # minimum matching posts before fetching comments
+_SCRAPE_TIMEOUT_SECS = 600  # hard wall-clock limit for the whole scrape (10 min)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -44,52 +45,92 @@ _POST_POOL_TARGET = 50     # minimum matching posts before fetching comments
 
 def infer_topic_structure(topic: str, llm) -> dict:
     """
-    Ask the LLM to return the top 3 subreddits and 2-4 keyword variations for
-    the given topic.
+    Two-step LLM routing:
+      1. Classify what TYPE of thing the topic is (phone product, singer,
+         politician, sports event, TV show, etc.).
+      2. Use that classification to directly pick the 5 best subreddits for
+         this topic, ordered from best (most active/relevant) to good.
+
+    No downstream validation step — the LLM's own judgement of community
+    activity is used directly so scraping can start immediately.
 
     Returns:
-        {"subreddits": [...], "keywords": [...]}
+        {
+          "subreddits"     : [...],   # 3 subreddits, no r/ prefix, best-first
+          "keywords"       : [...],   # 4-6 search terms
+          "category"       : str,     # e.g. "Consumer Electronics"
+          "category_detail": str,     # e.g. "flagship smartphone by Apple"
+        }
     """
-    prompt = f"""Given the topic: "{topic}"
+    prompt = f"""You are a Reddit research expert specialising in community discovery.
 
-Return ONLY a JSON object with this exact schema:
-{{
-    "subreddits": ["subreddit1", "subreddit2", "subreddit3"],
-    "keywords": ["keyword1", "keyword2", "keyword3", "keyword4"]
-}}
+USER INPUT: "{topic}"
 
+─── STEP 1: UNDERSTAND & CLASSIFY ───────────────────────────────────────────
+Identify the exact core subject and classify it into ONE of these categories:
+  • Consumer Electronics     — smartphone, laptop, tablet, headphones, camera, smartwatch, gaming console
+  • Software / App / Game    — mobile app, video game, PC software, OS, web platform, SaaS tool
+  • Person – Celebrity       — singer, rapper, band, actor, actress, comedian, YouTube creator, influencer
+  • Person – Public Figure   — politician, CEO, athlete, scientist, activist, business leader
+  • Event                    — sports match/tournament, concert/festival, awards show, product launch, news event
+  • Media Content            — movie, TV show, anime, book, podcast, streaming series
+  • Company / Brand          — tech company, retailer, car brand, food brand, financial institution
+  • Fashion / Lifestyle      — clothing brand, beauty product, food/drink brand, fitness trend
+  • Concept / Trend          — financial concept (crypto/stock), social movement, technology trend, cultural phenomenon
+  • Other                    — anything that does not fit above
+
+─── STEP 2: GENERATE SUBREDDITS ─────────────────────────────────────────────
+Think about WHO discusses this topic on Reddit and WHERE, then pick the
+BEST 3 subreddits — no candidate list, no validation step, just your best
+final answer.
+Return EXACTLY 3 subreddit names (no "r/" prefix), ordered from BEST to GOOD
+(start with the most active and most relevant, end with the least):
+  • 1 subreddit DEDICATED to this exact subject (brand sub, fan sub, product sub, official community)
+  • 1 CATEGORY subreddit (e.g. r/smartphones, r/Music, r/gaming, r/television)
+  • 1 BROADER interest sub that regularly features this topic (r/technology, r/news, r/entertainment)
+Only include subreddits you are confident are real, currently active, and have
+100k+ subscribers. Prefer fewer, high-confidence subreddits over guessing.
+
+─── STEP 3: KEYWORDS ────────────────────────────────────────────────────────
+Return 4-6 lowercase keywords users type when searching for this topic.
 Rules:
-- subreddits: TOP 3 most relevant, active subreddits (no 'r/' prefix).
-- keywords: 3-5 lowercase search terms real users type when discussing this topic.
-  Follow these keyword rules strictly:
-  1. ALWAYS include the full topic string (or its closest natural form) as the
-     first keyword.
-  2. If the topic contains a tier, version, edition, or spec qualifier
-     (e.g. "Pro Max", "Ultra", "Plus", "5G", "Gen 2", "S24+", "v2"),
-     EVERY keyword variation MUST preserve that qualifier — never drop it.
-     Example for "iPhone 17 Pro Max":
-       GOOD → ["iphone 17 pro max", "ip17 pro max", "iphone17 pro max", "apple iphone 17 pro max"]
-       BAD  → ["iphone17", "ip17", "apple iphone"]  ← these lose "pro max"
-  3. Include informal abbreviations ONLY if they still carry the full qualifier.
-  4. Broad parent-brand keywords (e.g. just "iphone", "samsung") are acceptable
-     as the LAST keyword only, for fallback coverage.
+  1. ALWAYS include the exact topic string as the first keyword.
+  2. Preserve version/tier qualifiers (Pro Max, Ultra, Gen 2, S25+, etc.) in EVERY keyword — never drop them.
+  3. Include 1-2 informal abbreviations only if they keep the qualifier.
+  4. The LAST keyword may be the broad parent term for fallback coverage.
 
-Output ONLY the JSON object — no explanation."""
+─── OUTPUT ──────────────────────────────────────────────────────────────────
+Return ONLY valid JSON (no markdown, no explanation):
+{{
+  "topic"           : "cleaned exact topic name",
+  "category"        : "category from the list above",
+  "category_detail" : "one-phrase description, e.g. \\"flagship smartphone by Apple\\" or \\"K-pop idol (BTS member)\\"",
+  "subreddits"      : ["sub1", "sub2", "sub3"],
+  "keywords"        : ["keyword1", ..., "keyword6"]
+}}"""
 
     try:
-        print(f"  LLM structuring topic: '{topic}'...")
+        print(f"  LLM classifying and routing topic: '{topic}'...")
         response = llm.invoke(prompt)
         text     = response.content if hasattr(response, "content") else str(response)
 
         start = text.find("{")
         end   = text.rfind("}") + 1
         if start != -1 and end > start:
-            parsed     = json.loads(text[start:end])
-            subreddits = parsed.get("subreddits", [])
-            keywords   = parsed.get("keywords",   [topic.lower()])
+            parsed          = json.loads(text[start:end])
+            subreddits      = parsed.get("subreddits",       [])
+            keywords        = parsed.get("keywords",         [topic.lower()])
+            category        = parsed.get("category",         "")
+            category_detail = parsed.get("category_detail",  "")
+            print(f"  Category   : {category} — {category_detail}")
             print(f"  Subreddits : {subreddits}")
             print(f"  Keywords   : {keywords}")
-            return {"subreddits": subreddits, "keywords": keywords}
+            return {
+                "subreddits"      : subreddits,
+                "keywords"        : keywords,
+                "category"        : category,
+                "category_detail" : category_detail,
+            }
 
         print("  Could not parse LLM response — using fallback")
 
@@ -97,8 +138,10 @@ Output ONLY the JSON object — no explanation."""
         print(f"  LLM error: {str(exc)[:150]}")
 
     return {
-        "subreddits": ["iphone", "apple", "technology"],
-        "keywords"  : [topic.lower()],
+        "subreddits"      : ["technology", "gadgets", "reviews"],
+        "keywords"        : [topic.lower()],
+        "category"        : "",
+        "category_detail" : "",
     }
 
 
@@ -136,6 +179,10 @@ def _is_stickied(post: dict) -> bool:
     )
 
 
+_REQUEST_TIMEOUT = 60   # seconds; Arctic Shift historical searches can be slow
+_MAX_RETRIES     = 3    # retry count for transient timeouts / network hiccups
+
+
 def _fetch_submissions(subreddit: str, before_ts: int = None) -> list:
     """
     GET /api/posts/search for one page of posts.
@@ -144,7 +191,8 @@ def _fetch_submissions(subreddit: str, before_ts: int = None) -> list:
     Uses `before` cursor for rule 3 pagination.
 
     Returns:
-        List of post dicts, or [] on any error.
+        List of post dicts, or [] if the API is genuinely empty or all
+        retry attempts are exhausted.
     """
     params = {
         "subreddit": subreddit,
@@ -154,20 +202,40 @@ def _fetch_submissions(subreddit: str, before_ts: int = None) -> list:
     if before_ts is not None:
         params["before"] = before_ts
 
-    try:
-        r = requests.get(_POSTS_ENDPOINT, params=params, timeout=20)
-        time.sleep(_SLEEP)  # rule 1 — always throttle
+    for attempt in range(1, _MAX_RETRIES + 1):
+        try:
+            r = requests.get(_POSTS_ENDPOINT, params=params, timeout=_REQUEST_TIMEOUT)
+            time.sleep(_SLEEP)  # rule 1 — always throttle
 
-        if r.status_code == 200:
-            return r.json().get("data") or []
+            if r.status_code == 200:
+                return r.json().get("data") or []
 
-        print(f"    Posts API {r.status_code}: {r.text[:120]}")
-        return []
+            print(f"    Posts API {r.status_code}: {r.text[:120]}")
+            return []
 
-    except Exception as exc:
-        time.sleep(_SLEEP)
-        print(f"    Posts request error: {str(exc)[:120]}")
-        return []
+        except Exception as exc:
+            exc_msg = str(exc).lower()
+            # Retry on transient network failures:
+            #   - read timeouts (urllib3 wraps these as ConnectionError, hence message check)
+            #   - truncated responses (server closed connection before finishing JSON body)
+            is_transient = (
+                "timed out"  in exc_msg
+                or "timeout" in exc_msg
+                or isinstance(exc, json.JSONDecodeError)
+                or isinstance(exc, requests.exceptions.ChunkedEncodingError)
+            )
+            if is_transient:
+                wait = attempt * 8
+                print(f"    Posts response incomplete (attempt {attempt}/{_MAX_RETRIES})"
+                      f" — retrying in {wait}s...")
+                time.sleep(wait)
+            else:
+                time.sleep(_SLEEP)
+                print(f"    Posts request error: {str(exc)[:120]}")
+                return []
+
+    print(f"    Posts request failed after {_MAX_RETRIES} attempts — skipping page")
+    return []
 
 
 def _fetch_comments_chunk(link_id: str, before_ts: int = None) -> list:
@@ -178,7 +246,7 @@ def _fetch_comments_chunk(link_id: str, before_ts: int = None) -> list:
     Applies rule 1 (sleep) and rule 2 (limit=100).
 
     Returns:
-        List of comment dicts, or [] on any error.
+        List of comment dicts, or [] if genuinely empty or all retries exhausted.
     """
     params = {
         "link_id": link_id,
@@ -188,20 +256,37 @@ def _fetch_comments_chunk(link_id: str, before_ts: int = None) -> list:
     if before_ts is not None:
         params["before"] = before_ts
 
-    try:
-        r = requests.get(_COMMENTS_ENDPOINT, params=params, timeout=20)
-        time.sleep(_SLEEP)  # rule 1
+    for attempt in range(1, _MAX_RETRIES + 1):
+        try:
+            r = requests.get(_COMMENTS_ENDPOINT, params=params, timeout=_REQUEST_TIMEOUT)
+            time.sleep(_SLEEP)  # rule 1
 
-        if r.status_code == 200:
-            return r.json().get("data") or []
+            if r.status_code == 200:
+                return r.json().get("data") or []
 
-        print(f"    Comments API {r.status_code}: {r.text[:120]}")
-        return []
+            print(f"    Comments API {r.status_code}: {r.text[:120]}")
+            return []
 
-    except Exception as exc:
-        time.sleep(_SLEEP)
-        print(f"    Comments request error: {str(exc)[:120]}")
-        return []
+        except Exception as exc:
+            exc_msg = str(exc).lower()
+            is_transient = (
+                "timed out"  in exc_msg
+                or "timeout" in exc_msg
+                or isinstance(exc, json.JSONDecodeError)
+                or isinstance(exc, requests.exceptions.ChunkedEncodingError)
+            )
+            if is_transient:
+                wait = attempt * 8
+                print(f"    Comments response incomplete (attempt {attempt}/{_MAX_RETRIES})"
+                      f" — retrying in {wait}s...")
+                time.sleep(wait)
+            else:
+                time.sleep(_SLEEP)
+                print(f"    Comments request error: {str(exc)[:120]}")
+                return []
+
+    print(f"    Comments request failed after {_MAX_RETRIES} attempts — skipping post")
+    return []
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -229,6 +314,8 @@ def scrape_with_api(
     lucene_q     = _format_lucene_query(keywords)
     all_comments = []
     start_ts     = int(datetime.now().timestamp())
+    deadline     = time.time() + _SCRAPE_TIMEOUT_SECS
+    timed_out    = False
 
     print(f"\n{'='*60}")
     print(f"Arctic Shift API collection started")
@@ -236,12 +323,16 @@ def scrape_with_api(
     print(f"  Keywords   : {keywords}")
     print(f"  Lucene q   : {lucene_q}")
     print(f"  Target     : {min_comments} comments")
-    print(f"  Press Ctrl+C at any time to stop and keep collected data.")
+    print(f"  Timeout    : {_SCRAPE_TIMEOUT_SECS}s")
     print(f"{'='*60}")
 
     try:
         for subreddit in subreddits:
             if len(all_comments) >= min_comments:
+                break
+            if time.time() >= deadline:
+                timed_out = True
+                print(f"  [timeout] Wall-clock limit reached — stopping scrape early")
                 break
 
             print(f"\n--- r/{subreddit} ---")
@@ -252,6 +343,10 @@ def scrape_with_api(
             weeks_checked = 0
 
             while len(matching_ids) < _POST_POOL_TARGET and weeks_checked < _MAX_LOOKBACK_WEEKS:
+                if time.time() >= deadline:
+                    timed_out = True
+                    print(f"  [timeout] Wall-clock limit reached during post scan — stopping")
+                    break
                 weeks_checked += 1
                 posts = _fetch_submissions(subreddit, before_ts=post_cursor)
 
@@ -289,11 +384,21 @@ def scrape_with_api(
             for post_num, link_id in enumerate(matching_ids, start=1):
                 if done:
                     break
+                if time.time() >= deadline:
+                    timed_out = True
+                    print(f"  [timeout] Wall-clock limit reached during comment fetch — stopping")
+                    break
 
                 comment_cursor = None
                 page_num       = 0
 
                 while True:
+                    if time.time() >= deadline:
+                        timed_out = True
+                        print(f"  [timeout] Wall-clock limit reached — stopping comment pages")
+                        done = True
+                        break
+
                     page_num += 1
                     raw_comments = _fetch_comments_chunk(link_id, before_ts=comment_cursor)
 
@@ -331,7 +436,10 @@ def scrape_with_api(
     except KeyboardInterrupt:
         print(f"\n\n  [STOPPED] Ctrl+C received — saving {len(all_comments)} collected comments.")
 
-    if len(all_comments) < min_comments and len(all_comments) > 0:
+    if timed_out:
+        print(f"  [timeout] Scrape stopped after {_SCRAPE_TIMEOUT_SECS}s "
+              f"— collected {len(all_comments)} comments.")
+    elif len(all_comments) < min_comments and len(all_comments) > 0:
         print(f"  Collected {len(all_comments)}/{min_comments} comments before stopping.")
 
     return {
@@ -342,6 +450,7 @@ def scrape_with_api(
         "posts_count"   : 0,
         "comments_count": len(all_comments),
         "target_reached": len(all_comments) >= min_comments,
+        "timed_out"     : timed_out,
         "scraped_at"    : datetime.now().isoformat(),
     }
 
