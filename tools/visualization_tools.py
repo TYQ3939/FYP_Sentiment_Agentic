@@ -21,6 +21,108 @@ import plotly.express as px
 warnings.filterwarnings('ignore')
 
 
+# ── Wordcloud stop-word helpers ───────────────────────────────────────────────
+
+_GENERIC_SELF_REF_WORDS = {
+    "phone", "smartphone", "device", "laptop", "tablet", "watch", "camera",
+    "app", "game", "show", "movie", "series", "song", "album", "car",
+    "vehicle", "headphone", "headphones", "earbud", "earbuds", "speaker",
+    "console", "computer", "pc", "tv", "television",
+}
+
+
+def _build_topic_stopwords(topic: str, category_detail: str = "") -> set:
+    """
+    Build a set of stopwords derived from the topic and category_detail strings.
+    Adds generic product-category nouns when they appear as a substring of any
+    topic token (e.g. "iphone" contains "phone" → also stop "phone").
+    """
+    combined = f"{topic} {category_detail}".lower()
+    tokens   = set(t.strip("_-") for t in combined.split() if len(t) > 2)
+
+    extra = set()
+    for token in tokens:
+        for generic in _GENERIC_SELF_REF_WORDS:
+            if generic in token:
+                extra.add(generic)
+
+    return tokens | extra
+
+
+def _nice_y_dtick(max_val: int, target_ticks: int = 8) -> int:
+    """Return a round-number tick interval that produces ~target_ticks ticks."""
+    if max_val <= 0:
+        return 1
+    candidates = [1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500,
+                  1000, 2000, 5000, 10000]
+    ideal = max_val / target_ticks
+    return min(candidates, key=lambda c: abs(c - ideal))
+
+
+# ── Word-frequency helper (used by AdvisorAgent for wordcloud insight) ────────
+
+def get_top_words_by_sentiment(
+    sentiment_data: Dict,
+    processed_data: List[Dict],
+    topic: str = "",
+    category_detail: str = "",
+    top_n: int = 12,
+) -> Dict[str, list]:
+    """
+    Count word frequencies per sentiment bucket from preprocessed lemma texts.
+    Returns {overall, positive, neutral, negative}: [(word, count), ...]
+    """
+    import re
+    from collections import Counter
+
+    stops = _build_topic_stopwords(topic, category_detail)
+    # Also use English stop-words from a simple set
+    _BASIC_STOPS = {
+        "the","a","an","and","or","but","in","on","at","to","for","of","with",
+        "is","was","are","were","be","been","have","has","had","do","did","does",
+        "not","no","so","if","as","by","from","this","that","it","its","they",
+        "their","them","he","she","we","you","i","my","our","your","his","her",
+        "just","like","more","very","also","than","then","when","what","about",
+        "which","who","will","would","could","should","can","may","get","got",
+        "one","two","three","all","some","any","other","new","good","great",
+    }
+    stops = stops | _BASIC_STOPS
+
+    detailed = sentiment_data.get("detailed_sentiments", [])
+
+    # Build flat list of (text, label) from processed_data wordcloud lemmas
+    all_texts: List[str] = []
+    all_labels: List[str] = []
+    for src in processed_data:
+        if not isinstance(src, dict):
+            continue
+        wc_texts = src.get("preprocessing", {}).get("wordcloud", {}).get("comments", [])
+        for text in wc_texts:
+            all_texts.append(text)
+            all_labels.append("__unknown__")  # label assigned below by index match
+
+    # Map to sentiment labels via detailed_sentiments index
+    sent_labels = [s.get("label", "neutral") for s in detailed]
+    for i in range(min(len(all_texts), len(sent_labels))):
+        all_labels[i] = sent_labels[i]
+
+    def _count(texts):
+        words = []
+        for t in texts:
+            for w in re.findall(r"[a-z]{3,}", t.lower()):
+                if w not in stops:
+                    words.append(w)
+        return Counter(words).most_common(top_n)
+
+    buckets: Dict[str, list] = {"overall": [], "positive": [], "neutral": [], "negative": []}
+    buckets["overall"] = _count(all_texts)
+    for label in ("positive", "neutral", "negative"):
+        bucket_texts = [t for t, l in zip(all_texts, all_labels) if l == label]
+        buckets[label] = _count(bucket_texts)
+
+    return buckets
+
+
 def generate_timeline_chart(
     sentiments: List[Dict],
     use_timestamps: bool = True,
@@ -158,7 +260,7 @@ def generate_timeline_chart(
             grouped["neutral"].max(),
             grouped["negative"].max(),
         ))
-        y_dtick = max(1, max_count // 10)
+        y_dtick = _nice_y_dtick(max_count)
 
         # ── Anomaly markers ───────────────────────────────────────────────────
         if anomaly_dates:
@@ -219,7 +321,12 @@ def generate_timeline_chart(
         return None
 
 
-def generate_wordcloud_by_sentiment(sentiment_data: Dict, processed_data: List[Dict], topic: str = "") -> Dict[str, bytes]:
+def generate_wordcloud_by_sentiment(
+    sentiment_data: Dict,
+    processed_data: List[Dict],
+    topic: str = "",
+    category_detail: str = "",
+) -> Dict[str, bytes]:
     """
     Generate wordclouds broken down by sentiment and POS type.
 
@@ -241,7 +348,7 @@ def generate_wordcloud_by_sentiment(sentiment_data: Dict, processed_data: List[D
 
     wordclouds = {}
 
-    custom_stops = set(topic.lower().split()) if topic else set()
+    custom_stops = _build_topic_stopwords(topic, category_detail)
 
     nlp_wc = None
     try:

@@ -2,62 +2,90 @@
 import json
 
 class AdvisorAgent(BaseAgent):
-    """Advisor Agent that generates aspect-level recommendations and handles follow-up questions."""
-    
+    """Advisor Agent that generates LLM-powered per-tab insights and handles follow-up questions."""
+
     def __init__(self):
         super().__init__(
             "AdvisorAgent",
-            "You are an advisor agent that provides strategic recommendations based on aspect-level sentiment analysis."
+            "You are an advisor agent that provides insights and recommendations based on sentiment analysis.",
         )
 
     def run(self) -> dict:
-        """Generate aspect-level recommendations based on sentiment analysis."""
-    
-        self.log("Starting recommendation generation...")
-    
+        """Generate LLM-powered per-tab insights and consumer recommendations."""
+
+        self.log("Starting advisor insight generation...")
+
         try:
-            state = self.load_state()
+            state             = self.load_state()
             sentiment_results = state.get("sentiment_results", {})
-            metadata = state.get("metadata", {})
-            aspect_analysis = state.get("aspect_analysis", {})
-        
+            aspect_analysis   = state.get("aspect_analysis", {})
+            metadata          = state.get("metadata", {})
+            processed_data    = state.get("processed_data", [])
+            detailed          = sentiment_results.get("detailed_sentiments", [])
+
             if not sentiment_results:
-                self.log("⚠️ No sentiment data to base recommendations on")
+                self.log("No sentiment data available")
                 return {"status": "warning", "message": "No sentiment data found"}
-        
-            topic = metadata.get("topic", "the analyzed topic")
-            overall_sentiment = sentiment_results.get("overall_sentiment", "neutral")
-        
-            self.log("Generating aspect-level recommendations...")
-        
-            from tools.advisor_tools import generate_aspect_recommendations, generate_suggested_questions
-        
-            # Generate recommendations based on valid aspects only
-            recommendations = generate_aspect_recommendations(
-                aspect_analysis,
-                topic,
-                overall_sentiment,
-                min_mentions=3  # Only show aspects mentioned 3+ times
+
+            topic           = metadata.get("topic", "the analyzed topic")
+            category_detail = metadata.get("category_detail", "")
+            overall         = sentiment_results.get("overall_sentiment", "neutral")
+
+            from tools.advisor_tools import (
+                generate_summary_insight,
+                generate_timeline_insight,
+                generate_wordcloud_insight,
+                generate_absa_insight,
+                generate_absa_recommendations,
+                generate_suggested_questions,
             )
-        
-            # Generate suggested questions for follow-up
+            from tools.visualization_tools import get_top_words_by_sentiment
+
+            # Per-tab LLM insights
+            self.log("Generating summary insight...")
+            summary_insight = generate_summary_insight(sentiment_results, topic, self.llm)
+
+            self.log("Generating timeline insight...")
+            timeline_insight = generate_timeline_insight(detailed, topic, self.llm)
+
+            self.log("Generating wordcloud insight...")
+            word_freqs = get_top_words_by_sentiment(
+                sentiment_results, processed_data, topic, category_detail
+            )
+            wordcloud_insight = generate_wordcloud_insight(word_freqs, topic, self.llm)
+
+            self.log("Generating ABSA insight...")
+            absa_insight = generate_absa_insight(aspect_analysis, topic, self.llm)
+
+            self.log("Generating consumer recommendations...")
+            recommendations = generate_absa_recommendations(aspect_analysis, overall, topic, self.llm)
+
+            self.log("Generating suggested questions...")
             suggested_questions = generate_suggested_questions(aspect_analysis, topic)
-        
-            self.save_state("recommendations", recommendations)
-            self.save_state("suggested_questions", suggested_questions)
-        
-            self.log(f"✅ Generated {len(recommendations)} recommendations")
-            self.log(f"✅ Generated {len(suggested_questions)} suggested questions")
-        
-            return {
-                "status": "success",
-                "recommendations": recommendations,
-                "suggested_questions": suggested_questions,
-                "aspect_analysis": aspect_analysis
+
+            advisor_insights = {
+                "summary"   : summary_insight,
+                "timeline"  : timeline_insight,
+                "wordcloud" : wordcloud_insight,
+                "absa"      : absa_insight,
             }
-    
+
+            self.save_state("advisor_insights",    advisor_insights)
+            self.save_state("recommendations",     recommendations)
+            self.save_state("suggested_questions", suggested_questions)
+
+            self.log(f"Advisor insights saved ({len(advisor_insights)} tabs)")
+
+            return {
+                "status"            : "success",
+                "advisor_insights"  : advisor_insights,
+                "recommendations"   : recommendations,
+                "suggested_questions": suggested_questions,
+                "aspect_analysis"   : aspect_analysis,
+            }
+
         except Exception as e:
-            self.log(f"❌ Error during recommendation generation: {str(e)}")
+            self.log(f"Error during advisor generation: {str(e)}")
             return {"status": "error", "error": str(e)}
 
     def answer_question(self, question: str) -> str:
