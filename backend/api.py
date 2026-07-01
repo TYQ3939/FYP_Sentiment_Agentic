@@ -204,15 +204,96 @@ async def list_jobs_by_status(status: str):
 async def delete_job(job_id: str):
     """Delete a job."""
     job = db.get_job(job_id)
-    
+
     if not job:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-    
+
     # Remove from database
     db.jobs.pop(job_id, None)
     db.save_to_file()
-    
+
     return {"message": f"Job {job_id} deleted"}
+
+
+# ========== RCA ENDPOINT ==========
+
+class RCARequest(BaseModel):
+    date: str  # "YYYY-MM-DD"
+
+@app.post("/rca/{job_id}")
+async def run_rca_analysis(job_id: str, request: RCARequest):
+    """
+    Run root cause analysis for a specific anomaly date in a completed job.
+
+    Pulls topic, aspect_analysis, and detailed_sentiments from the job's
+    saved state, runs the full RCA pipeline (web search + LLM evaluation),
+    caches the result back into the job record, and returns it.
+    """
+    import os
+    from langchain_groq import ChatGroq
+    from tools.rca_tools import run_rca
+
+    job = db.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    if job.get("status") != "completed":
+        raise HTTPException(status_code=400, detail="Job is not completed yet")
+
+    spike_date = request.date
+
+    # Check cache first
+    rca_cache = job.get("rca_cache", {})
+    if spike_date in rca_cache:
+        return rca_cache[spike_date]
+
+    # Extract required data from stored state
+    state = job.get("results", {}).get("state", {})
+    topic = state.get("metadata", {}).get("topic", "")
+    aspect_analysis = state.get("aspect_analysis", {})
+    detailed_sentiments = (
+        state.get("sentiment_results", {}).get("detailed_sentiments", [])
+    )
+
+    if not topic:
+        raise HTTPException(status_code=400, detail="Topic not found in job state")
+
+    # Build LLM (same Groq model used by all agents)
+    groq_key = os.getenv("GROQ_API_KEY", "")
+    if not groq_key:
+        raise HTTPException(status_code=500, detail="GROQ_API_KEY not configured")
+
+    llm = ChatGroq(
+        model="llama-3.3-70b-versatile",
+        temperature=0,
+        groq_api_key=groq_key,
+    )
+
+    try:
+        result = run_rca(topic, spike_date, aspect_analysis, detailed_sentiments, llm)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"RCA pipeline error: {str(e)[:200]}")
+
+    # Cache in job record so repeated clicks are instant
+    rca_cache[spike_date] = result
+    db.update_job(job_id, rca_cache=rca_cache)
+
+    # Also write to shared_state.json so AdvisorAgent.answer_question() can include
+    # root cause context when the user asks follow-up questions in the chat
+    try:
+        import json
+        state_file = "shared_state.json"
+        if os.path.exists(state_file):
+            with open(state_file, "r") as _f:
+                _state = json.load(_f)
+        else:
+            _state = {}
+        _state.setdefault("rca_cache", {})[spike_date] = result
+        with open(state_file, "w") as _f:
+            json.dump(_state, _f, indent=2)
+    except Exception:
+        pass  # Non-critical; advisor will still work without it
+
+    return result
 
 # ========== MAIN ==========
 

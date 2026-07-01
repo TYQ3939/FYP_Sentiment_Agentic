@@ -62,88 +62,84 @@ class AdvisorAgent(BaseAgent):
 
     def answer_question(self, question: str) -> str:
         """
-        Answer follow-up questions from the user based on analysis.
-        No LLM used here - just data-driven answers.
+        Answer follow-up questions using the Groq LLM with full analysis context
+        including any root cause findings from the timeline anomaly detection.
         """
-        
         self.log(f"Answering question: {question}")
-        
+
         try:
-            # Load analysis data
             state = self.load_state()
             sentiment_results = state.get("sentiment_results", {})
-            aspect_analysis = state.get("aspect_analysis", {})
-            metadata = state.get("metadata", {})
-            
-            topic = metadata.get("topic", "unknown")
-            distribution = sentiment_results.get('sentiment_distribution', {})
-            
-            # Build data-driven answer without requiring langchain_groq
-            question_lower = question.lower()
-            
-            # Answer based on keywords
-            if 'aspect' in question_lower or 'topic' in question_lower or 'what' in question_lower:
-                top_aspects = list(aspect_analysis.items())[:3]
-                answer = f"The top 3 aspects discussed about '{topic}' are:\n\n"
-                for i, (aspect, data) in enumerate(top_aspects, 1):
-                    neg_pct = data['negative']['percentage']
-                    pos_pct = data['positive']['percentage']
-                    answer += f"{i}. **{aspect.title()}**: "
-                    if neg_pct > 60:
-                        answer += f"Highly negative ({neg_pct:.1f}% negative)\n"
-                    elif pos_pct > 60:
-                        answer += f"Highly positive ({pos_pct:.1f}% positive)\n"
-                    else:
-                        answer += f"Mixed sentiment\n"
-            
-            elif 'negative' in question_lower or 'problem' in question_lower or 'issue' in question_lower:
-                negative_aspects = sorted(
-                    [(a, d) for a, d in aspect_analysis.items()],
-                    key=lambda x: x[1]['negative']['percentage'],
-                    reverse=True
-                )[:3]
-                
-                answer = "The top 3 aspects with negative sentiment are:\n\n"
-                for i, (aspect, data) in enumerate(negative_aspects, 1):
-                    answer += f"{i}. **{aspect.title()}**: {data['negative']['percentage']:.1f}% negative ({data['negative']['count']} mentions)\n"
-            
-            elif 'positive' in question_lower or 'strength' in question_lower or 'good' in question_lower:
-                positive_aspects = sorted(
-                    [(a, d) for a, d in aspect_analysis.items()],
-                    key=lambda x: x[1]['positive']['percentage'],
-                    reverse=True
-                )[:3]
-                
-                answer = "The top 3 aspects with positive sentiment are:\n\n"
-                for i, (aspect, data) in enumerate(positive_aspects, 1):
-                    answer += f"{i}. **{aspect.title()}**: {data['positive']['percentage']:.1f}% positive ({data['positive']['count']} mentions)\n"
-            
-            elif 'overall' in question_lower or 'sentiment' in question_lower:
-                pos_pct = distribution.get('positive', {}).get('percentage', 0)
-                neu_pct = distribution.get('neutral', {}).get('percentage', 0)
-                neg_pct = distribution.get('negative', {}).get('percentage', 0)
-                
-                answer = f"**Overall Sentiment Analysis for '{topic}':**\n\n"
-                answer += f"- Positive: {pos_pct:.1f}%\n"
-                answer += f"- Neutral: {neu_pct:.1f}%\n"
-                answer += f"- Negative: {neg_pct:.1f}%\n\n"
-                answer += f"The dominant sentiment is **{sentiment_results.get('overall_sentiment', 'neutral').upper()}**"
-            
-            else:
-                # Generic answer for other questions
-                answer = (
-                    f"Based on the analysis of '{topic}':\n\n"
-                    f"The overall sentiment is {sentiment_results.get('overall_sentiment', 'neutral').upper()} "
-                    f"({sentiment_results.get('confidence', 0):.0%} confidence).\n\n"
-                    f"Key aspects discussed: {', '.join([a for a in list(aspect_analysis.keys())[:5]])}\n\n"
-                    f"For more specific information, ask about positive/negative aspects, "
-                    f"or specific topics you're interested in."
-                )
-            
-            self.log(f"✅ Question answered")
-            
+            aspect_analysis   = state.get("aspect_analysis", {})
+            metadata          = state.get("metadata", {})
+            rca_cache         = state.get("rca_cache", {})
+
+            topic        = metadata.get("topic", "unknown")
+            overall      = sentiment_results.get("overall_sentiment", "neutral")
+            distribution = sentiment_results.get("sentiment_distribution", {})
+            confidence   = sentiment_results.get("confidence", 0)
+
+            # Sentiment distribution summary
+            pos_pct = distribution.get("positive", {}).get("percentage", 0)
+            neu_pct = distribution.get("neutral",  {}).get("percentage", 0)
+            neg_pct = distribution.get("negative", {}).get("percentage", 0)
+            dist_str = f"{pos_pct:.1f}% positive / {neu_pct:.1f}% neutral / {neg_pct:.1f}% negative"
+
+            # Top aspects
+            top_aspects = list(aspect_analysis.items())[:8]
+            aspects_str = "\n".join(
+                f"  - {a}: {d.get('positive',{}).get('percentage',0):.0f}% pos, "
+                f"{d.get('negative',{}).get('percentage',0):.0f}% neg "
+                f"({d.get('total_mentions', 0)} mentions)"
+                for a, d in top_aspects
+            ) or "  (no aspect data available)"
+
+            # Root cause findings (from timeline anomaly analysis)
+            rca_str = ""
+            if rca_cache:
+                rca_lines = []
+                for date, r in rca_cache.items():
+                    summary = r.get("root_cause_summary", "")
+                    status  = r.get("status", "?")
+                    aspects_hit = ", ".join(r.get("aspects_analyzed", []))
+                    rca_lines.append(
+                        f"  - {date}: [{status}] {summary}"
+                        + (f" (aspects: {aspects_hit})" if aspects_hit else "")
+                    )
+                rca_str = "\nRoot Cause Analysis Findings:\n" + "\n".join(rca_lines)
+
+            prompt = (
+                f"You are a helpful assistant explaining Reddit sentiment analysis results "
+                f"about '{topic}' to a curious general-public reader.\n\n"
+                f"Overall sentiment: {overall.upper()} ({confidence:.0%} confidence)\n"
+                f"Sentiment distribution: {dist_str}\n\n"
+                f"Top discussed aspects:\n{aspects_str}\n"
+                f"{rca_str}\n\n"
+                f"User question: {question}\n\n"
+                f"Answer conversationally in 2-4 sentences. Be specific with numbers and "
+                f"aspect names where relevant. Frame the answer for a consumer deciding "
+                f"whether to buy/try {topic}, not for a business analyst."
+            )
+
+            response = self.llm.invoke(prompt)
+            answer = response.content if hasattr(response, "content") else str(response)
+            self.log("Question answered via LLM")
             return answer
-        
+
         except Exception as e:
-            self.log(f"❌ Error answering question: {str(e)}")
-            return f"I encountered an error while answering: {str(e)[:100]}"
+            self.log(f"LLM answer failed, using fallback: {str(e)[:80]}")
+            # Rule-based fallback so the chat never hard-fails
+            try:
+                state = self.load_state()
+                topic = state.get("metadata", {}).get("topic", "this topic")
+                overall = state.get("sentiment_results", {}).get("overall_sentiment", "neutral")
+                dist    = state.get("sentiment_results", {}).get("sentiment_distribution", {})
+                pos = dist.get("positive", {}).get("percentage", 0)
+                neg = dist.get("negative", {}).get("percentage", 0)
+                return (
+                    f"Based on the Reddit analysis of '{topic}', the overall sentiment is "
+                    f"{overall.upper()} with {pos:.1f}% positive and {neg:.1f}% negative comments. "
+                    f"For more detail, try asking about specific aspects like camera, battery, or price."
+                )
+            except Exception:
+                return "I couldn't retrieve the analysis data. Please make sure an analysis has been completed."

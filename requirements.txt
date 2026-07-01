@@ -38,6 +38,9 @@ requests==2.31.0
 beautifulsoup4==4.12.2
 aiohttp==3.9.1
 
+# ========== Root Cause Analysis (RCA) Search ==========
+tavily-python>=0.3.0
+
 # ========== Browser Automation ==========
 playwright>=1.40.0
 
