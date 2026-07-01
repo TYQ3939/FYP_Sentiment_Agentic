@@ -32,6 +32,14 @@ plotly==5.18.0
 wordcloud==1.9.3
 matplotlib==3.8.2
 
+# ========== Topic Modelling (ABSA) ==========
+bertopic>=0.16.0
+umap-learn>=0.5.6
+hdbscan>=0.8.33
+
+# ========== RCA Web Search ==========
+tavily-python>=0.3.0
+
 # ========== Web & API ==========
 google-api-python-client==1.12.5
 requests==2.31.0
