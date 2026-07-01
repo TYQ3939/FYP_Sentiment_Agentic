@@ -59,7 +59,7 @@ class JobDatabase:
             with open(self.db_file, 'w') as f:
                 json.dump(self.jobs, f, indent=2, default=str)
         except Exception as e:
-            print(f"⚠️ Failed to save jobs to file: {e}")
+            print(f"[WARN] Failed to save jobs to file: {e}")
     
     def load_from_file(self):
         """Load jobs from file."""
@@ -68,7 +68,7 @@ class JobDatabase:
                 with open(self.db_file, 'r') as f:
                     self.jobs = json.load(f)
             except Exception as e:
-                print(f"⚠️ Failed to load jobs from file: {e}")
+                print(f"[WARN] Failed to load jobs from file: {e}")
 
 # Global database instance
 db = JobDatabase()

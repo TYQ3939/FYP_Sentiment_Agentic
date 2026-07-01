@@ -110,7 +110,7 @@ async def start_scrape(request: ScrapeRequest, background_tasks: BackgroundTasks
         # This returns immediately while the task runs separately
         background_tasks.add_task(process_scraping_job, job_id, request.topic, subreddits)
 
-        print(f"📌 Job {job_id} queued for background processing")
+        print(f"[QUEUED] Job {job_id} queued for background processing")
 
         return {
             "job_id": job_id,
@@ -299,17 +299,17 @@ async def delete_job(job_id: str):
 def run_server(host: str = "127.0.0.1", port: int = 8000):
     """Run the FastAPI server."""
     print(f"\n{'='*60}")
-    print(f"🚀 Starting Sentiment Analysis Backend API")
+    print(f"[START] Sentiment Analysis Backend API")
     print(f"{'='*60}")
     print(f"Host: {host}")
     print(f"Port: {port}")
     print(f"Docs: http://{host}:{port}/docs")
     print(f"Health: http://{host}:{port}/health")
     print(f"{'='*60}\n")
-    
-    print("✅ Backend runs independently from Streamlit")
-    print("✅ All scraping happens in isolated background threads")
-    print("✅ No asyncio conflicts with Streamlit\n")
+
+    print("[OK] Backend runs independently from Streamlit")
+    print("[OK] All scraping happens in isolated background threads")
+    print("[OK] No asyncio conflicts with Streamlit\n")
     
     uvicorn.run(
         app,
