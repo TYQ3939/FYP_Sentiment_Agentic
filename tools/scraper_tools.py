@@ -18,10 +18,12 @@ CORE API RULES & SAFEGUARDS
 """
 
 import json
+import os
 import time
 import requests
 import pandas as pd
 from datetime import datetime
+from typing import Optional
 
 # ─── API endpoints ─────────────────────────────────────────────────────────────
 _API_BASE         = "https://arctic-shift.photon-reddit.com"
@@ -374,6 +376,245 @@ def scrape_with_api(
         "target_reached": len(all_comments) >= min_comments,
         "scraped_at"    : datetime.now().isoformat(),
     }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# FALLBACK A — YOUTUBE API SCRAPER
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def scrape_with_youtube(topic: str, keywords: list, min_comments: int = _MIN_COMMENTS) -> dict:
+    """
+    Fallback data source using the YouTube Data API v3.
+
+    Differences from Reddit / Arctic Shift:
+    - Searches by topic directly (no subreddit routing needed).
+    - Pagination uses pageToken, not a timestamp cursor.
+    - Comments are all viewers of matching videos — no secondary keyword
+      filter required since the search API already returns relevant videos.
+    - Score field = likeCount (int) instead of Reddit karma.
+
+    Requires YOUTUBE_API_KEY in the environment (.env).
+    Raises EnvironmentError if the key is absent.
+    """
+    api_key = os.getenv("YOUTUBE_API_KEY", "")
+    if not api_key:
+        raise EnvironmentError(
+            "YOUTUBE_API_KEY not set — YouTube fallback unavailable. "
+            "Add it to your .env file."
+        )
+
+    _YT_SEARCH   = "https://www.googleapis.com/youtube/v3/search"
+    _YT_COMMENTS = "https://www.googleapis.com/youtube/v3/commentThreads"
+
+    print(f"\n{'='*60}")
+    print(f"YouTube API fallback started")
+    print(f"  Topic    : {topic}")
+    print(f"  Keywords : {keywords}")
+    print(f"  Target   : {min_comments} comments")
+    print(f"{'='*60}")
+
+    # ── Phase 1: Search for relevant videos ──────────────────────────────────
+    # Use the topic + first two keywords as the search query for better relevance.
+    search_query = topic
+    if keywords:
+        extra = " ".join(keywords[:2])
+        if extra.lower() not in topic.lower():
+            search_query = f"{topic} {extra}"
+
+    video_ids  = []
+    page_token = None
+
+    for page in range(1, 5):  # max 4 pages × 50 = 200 candidate videos
+        params = {
+            "key"              : api_key,
+            "q"                : search_query,
+            "type"             : "video",
+            "part"             : "snippet",
+            "maxResults"       : 50,
+            "relevanceLanguage": "en",
+            "order"            : "relevance",
+        }
+        if page_token:
+            params["pageToken"] = page_token
+
+        try:
+            r = requests.get(_YT_SEARCH, params=params, timeout=30)
+            time.sleep(_SLEEP)
+
+            if r.status_code != 200:
+                print(f"  YouTube search API {r.status_code}: {r.text[:120]}")
+                break
+
+            data  = r.json()
+            items = data.get("items", [])
+            for item in items:
+                vid_id = item.get("id", {}).get("videoId")
+                if vid_id:
+                    video_ids.append(vid_id)
+
+            print(f"  [YT search] page {page}: {len(items)} videos | pool={len(video_ids)}")
+            page_token = data.get("nextPageToken")
+            if not page_token or len(video_ids) >= 150:
+                break
+
+        except Exception as e:
+            print(f"  YouTube search error: {str(e)[:100]}")
+            break
+
+    if not video_ids:
+        raise RuntimeError("YouTube search returned no videos for this topic")
+
+    # ── Phase 2: Fetch comments from matching videos ──────────────────────────
+    all_comments = []
+
+    for vid_num, video_id in enumerate(video_ids, 1):
+        if len(all_comments) >= min_comments:
+            break
+
+        page_token = None
+        page_num   = 0
+
+        while True:
+            page_num += 1
+            params = {
+                "key"       : api_key,
+                "videoId"   : video_id,
+                "part"      : "snippet",
+                "maxResults": 100,
+                "order"     : "relevance",
+            }
+            if page_token:
+                params["pageToken"] = page_token
+
+            try:
+                r = requests.get(_YT_COMMENTS, params=params, timeout=30)
+                time.sleep(_SLEEP)
+
+                if r.status_code == 403:
+                    print(f"  [YT] video {vid_num}: comments disabled — skipping")
+                    break
+
+                if r.status_code != 200:
+                    print(f"  [YT comments] {r.status_code}: {r.text[:80]}")
+                    break
+
+                data  = r.json()
+                items = data.get("items", [])
+                added = 0
+
+                for item in items:
+                    snip = (
+                        item.get("snippet", {})
+                            .get("topLevelComment", {})
+                            .get("snippet", {})
+                    )
+                    text = snip.get("textDisplay", "").strip()
+                    if not text:
+                        continue
+
+                    published = snip.get("publishedAt", "")
+                    try:
+                        ts = int(
+                            datetime.strptime(published[:19], "%Y-%m-%dT%H:%M:%S")
+                            .timestamp()
+                        )
+                    except Exception:
+                        ts = int(datetime.now().timestamp())
+
+                    all_comments.append({
+                        "text"      : text,
+                        "author"    : snip.get("authorDisplayName", ""),
+                        "score"     : int(snip.get("likeCount", 0)),
+                        "created_at": str(ts),
+                        "post_id"   : video_id,
+                    })
+                    added += 1
+
+                print(
+                    f"  [YT] video {vid_num}/{len(video_ids)} ({video_id}), "
+                    f"page {page_num}: {added} comments | total={len(all_comments)}"
+                )
+
+                if len(all_comments) >= min_comments:
+                    print(f"  Target reached: {len(all_comments)} comments")
+                    break
+
+                page_token = data.get("nextPageToken")
+                if not page_token or not items:
+                    break
+
+            except Exception as e:
+                print(f"  [YT] video {vid_num} comment error: {str(e)[:100]}")
+                break
+
+    print(f"\n  YouTube complete: {len(all_comments)} comments from {len(video_ids)} videos")
+
+    return {
+        "subreddit"     : "YouTube",
+        "topic"         : topic,
+        "posts"         : [],
+        "comments"      : all_comments,
+        "posts_count"   : 0,
+        "comments_count": len(all_comments),
+        "target_reached": len(all_comments) >= min_comments,
+        "scraped_at"    : datetime.now().isoformat(),
+        "source"        : "youtube",
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# FALLBACK B — LOCAL DATASET LOOKUP
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def find_local_dataset(topic: str, data_dir: str = "./data/filtered_data") -> Optional[str]:
+    """
+    Find the most recently modified filtered JSON file for a topic.
+
+    Matches any file whose name starts with combined_<safe_topic>_filtered
+    (including versioned copies like _filtered_1.json, _filtered_2.json …).
+    Returns the full path of the newest match, or None if nothing found.
+    """
+    if not os.path.exists(data_dir):
+        return None
+
+    safe   = topic.replace(" ", "_").replace("/", "_")[:60]
+    prefix = f"combined_{safe}_filtered".lower()
+
+    matches = [
+        fname for fname in os.listdir(data_dir)
+        if fname.lower().startswith(prefix) and fname.endswith(".json")
+    ]
+
+    if not matches:
+        return None
+
+    matches.sort(
+        key=lambda f: os.path.getmtime(os.path.join(data_dir, f)),
+        reverse=True,
+    )
+    return os.path.join(data_dir, matches[0])
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# FILE VERSIONING HELPER
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def versioned_path(directory: str, base_name: str, ext: str) -> str:
+    """
+    Return a non-conflicting filepath in directory.
+
+    If <directory>/<base_name><ext> already exists, tries
+    <base_name>_1<ext>, <base_name>_2<ext>, … until a free slot is found.
+    """
+    candidate = os.path.join(directory, f"{base_name}{ext}")
+    if not os.path.exists(candidate):
+        return candidate
+    i = 1
+    while True:
+        candidate = os.path.join(directory, f"{base_name}_{i}{ext}")
+        if not os.path.exists(candidate):
+            return candidate
+        i += 1
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
