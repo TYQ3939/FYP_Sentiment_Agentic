@@ -31,6 +31,8 @@ _COMMENTS_ENDPOINT = f"{_API_BASE}/api/comments/search"
 # ─── Guardrail constants ───────────────────────────────────────────────────────
 _SLEEP            = 1.5    # seconds between every request  (rule 1)
 _MAX_LIMIT        = 100    # items per request               (rule 2)
+_REQUEST_TIMEOUT  = 60     # seconds per request before giving up
+_MAX_RETRIES      = 3      # retry attempts for transient errors (5xx, timeout)
 
 # ─── Collection parameters ─────────────────────────────────────────────────────
 _MIN_COMMENTS     = 500
@@ -154,20 +156,34 @@ def _fetch_submissions(subreddit: str, before_ts: int = None) -> list:
     if before_ts is not None:
         params["before"] = before_ts
 
-    try:
-        r = requests.get(_POSTS_ENDPOINT, params=params, timeout=20)
-        time.sleep(_SLEEP)  # rule 1 — always throttle
+    for attempt in range(1, _MAX_RETRIES + 1):
+        try:
+            r = requests.get(_POSTS_ENDPOINT, params=params, timeout=_REQUEST_TIMEOUT)
+            time.sleep(_SLEEP)
 
-        if r.status_code == 200:
-            return r.json().get("data") or []
+            if r.status_code == 200:
+                return r.json().get("data") or []
 
-        print(f"    Posts API {r.status_code}: {r.text[:120]}")
-        return []
+            if r.status_code >= 500:
+                print(f"    Posts API {r.status_code} (attempt {attempt}/{_MAX_RETRIES}) — retrying in {attempt * 8}s...")
+                if attempt < _MAX_RETRIES:
+                    time.sleep(attempt * 8)
+                    continue
+            else:
+                print(f"    Posts API {r.status_code}: {r.text[:120]}")
+            return []
 
-    except Exception as exc:
-        time.sleep(_SLEEP)
-        print(f"    Posts request error: {str(exc)[:120]}")
-        return []
+        except Exception as exc:
+            exc_msg = str(exc).lower()
+            is_transient = "timed out" in exc_msg or "timeout" in exc_msg
+            print(f"    Posts request error (attempt {attempt}/{_MAX_RETRIES}): {str(exc)[:120]}")
+            if is_transient and attempt < _MAX_RETRIES:
+                time.sleep(attempt * 8)
+                continue
+            time.sleep(_SLEEP)
+            return []
+
+    return []
 
 
 def _fetch_comments_chunk(link_id: str, before_ts: int = None) -> list:
@@ -188,20 +204,34 @@ def _fetch_comments_chunk(link_id: str, before_ts: int = None) -> list:
     if before_ts is not None:
         params["before"] = before_ts
 
-    try:
-        r = requests.get(_COMMENTS_ENDPOINT, params=params, timeout=20)
-        time.sleep(_SLEEP)  # rule 1
+    for attempt in range(1, _MAX_RETRIES + 1):
+        try:
+            r = requests.get(_COMMENTS_ENDPOINT, params=params, timeout=_REQUEST_TIMEOUT)
+            time.sleep(_SLEEP)
 
-        if r.status_code == 200:
-            return r.json().get("data") or []
+            if r.status_code == 200:
+                return r.json().get("data") or []
 
-        print(f"    Comments API {r.status_code}: {r.text[:120]}")
-        return []
+            if r.status_code >= 500:
+                print(f"    Comments API {r.status_code} (attempt {attempt}/{_MAX_RETRIES}) — retrying in {attempt * 8}s...")
+                if attempt < _MAX_RETRIES:
+                    time.sleep(attempt * 8)
+                    continue
+            else:
+                print(f"    Comments API {r.status_code}: {r.text[:120]}")
+            return []
 
-    except Exception as exc:
-        time.sleep(_SLEEP)
-        print(f"    Comments request error: {str(exc)[:120]}")
-        return []
+        except Exception as exc:
+            exc_msg = str(exc).lower()
+            is_transient = "timed out" in exc_msg or "timeout" in exc_msg
+            print(f"    Comments request error (attempt {attempt}/{_MAX_RETRIES}): {str(exc)[:120]}")
+            if is_transient and attempt < _MAX_RETRIES:
+                time.sleep(attempt * 8)
+                continue
+            time.sleep(_SLEEP)
+            return []
+
+    return []
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
