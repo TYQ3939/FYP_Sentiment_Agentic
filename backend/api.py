@@ -22,6 +22,9 @@ class ScrapeRequest(BaseModel):
     topic: str
     subreddits: Optional[List[str]] = None
 
+class RCARequest(BaseModel):
+    date: str  # YYYY-MM-DD of the anomaly to investigate
+
 class JobStatusLite(BaseModel):
     """Lightweight job status without large results payload"""
     id: str
@@ -199,6 +202,83 @@ async def list_jobs_by_status(status: str):
         "jobs": filtered_jobs,
         "total": len(filtered_jobs)
     }
+
+@app.post("/rca/{job_id}")
+async def run_rca_analysis(job_id: str, request: RCARequest):
+    """
+    Trigger Root Cause Analysis for a specific anomaly date in a completed job.
+    Results are cached in the job record so repeated calls for the same date
+    are instant.
+    """
+    job = db.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    if job["status"] != "completed":
+        raise HTTPException(status_code=400, detail="Job must be completed before running RCA")
+
+    spike_date = request.date
+
+    # Return cached result if available
+    rca_cache = job.get("rca_cache", {})
+    if spike_date in rca_cache:
+        return rca_cache[spike_date]
+
+    try:
+        results  = job.get("results", {})
+        analysis = results.get("analyst", {}).get("analysis", {})
+        metadata = results.get("scraper", {}).get("summary", {})
+
+        topic              = metadata.get("topic") or job.get("topic", "unknown")
+        detailed_sentiments = analysis.get("detailed_sentiments", [])
+        aspect_analysis    = results.get("analyst", {}).get("aspect_analysis", {})
+
+        if not detailed_sentiments:
+            # Try loading from shared state
+            import json, os
+            state_path = "./data/shared_state.json"
+            if os.path.exists(state_path):
+                with open(state_path, "r", encoding="utf-8") as f:
+                    state = json.load(f)
+                detailed_sentiments = state.get("sentiment_results", {}).get("detailed_sentiments", [])
+                aspect_analysis     = state.get("aspect_analysis", aspect_analysis)
+                if not topic or topic == "unknown":
+                    topic = state.get("metadata", {}).get("topic", "unknown")
+
+        from langchain_groq import ChatGroq
+        import os as _os
+        groq_key = _os.getenv("GROQ_API_KEY", "")
+        if not groq_key:
+            raise HTTPException(status_code=500, detail="GROQ_API_KEY not configured")
+
+        llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0.1, groq_api_key=groq_key)
+
+        from tools.rca_tools import run_rca
+        result = run_rca(topic, spike_date, aspect_analysis, detailed_sentiments, llm)
+
+        # Cache result
+        rca_cache[spike_date] = result
+        db.update_job(job_id, rca_cache=rca_cache)
+
+        # Also write to shared_state for AdvisorAgent context
+        try:
+            import json, os
+            state_path = "./data/shared_state.json"
+            if os.path.exists(state_path):
+                with open(state_path, "r", encoding="utf-8") as f:
+                    state = json.load(f)
+                state.setdefault("rca_cache", {})[spike_date] = result
+                with open(state_path, "w", encoding="utf-8") as f:
+                    json.dump(state, f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.delete("/scrape/jobs/{job_id}")
 async def delete_job(job_id: str):

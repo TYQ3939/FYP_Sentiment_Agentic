@@ -210,14 +210,20 @@ def _fetch_submissions(subreddit: str, before_ts: int = None) -> list:
             if r.status_code == 200:
                 return r.json().get("data") or []
 
+            # Retry on 5xx server errors (Arctic Shift transient failures)
+            if r.status_code >= 500:
+                wait = attempt * 8
+                print(f"    Posts API {r.status_code} (attempt {attempt}/{_MAX_RETRIES})"
+                      f" — retrying in {wait}s...")
+                if attempt < _MAX_RETRIES:
+                    time.sleep(wait)
+                    continue
+
             print(f"    Posts API {r.status_code}: {r.text[:120]}")
             return []
 
         except Exception as exc:
             exc_msg = str(exc).lower()
-            # Retry on transient network failures:
-            #   - read timeouts (urllib3 wraps these as ConnectionError, hence message check)
-            #   - truncated responses (server closed connection before finishing JSON body)
             is_transient = (
                 "timed out"  in exc_msg
                 or "timeout" in exc_msg
@@ -263,6 +269,15 @@ def _fetch_comments_chunk(link_id: str, before_ts: int = None) -> list:
 
             if r.status_code == 200:
                 return r.json().get("data") or []
+
+            # Retry on 5xx server errors
+            if r.status_code >= 500:
+                wait = attempt * 8
+                print(f"    Comments API {r.status_code} (attempt {attempt}/{_MAX_RETRIES})"
+                      f" — retrying in {wait}s...")
+                if attempt < _MAX_RETRIES:
+                    time.sleep(wait)
+                    continue
 
             print(f"    Comments API {r.status_code}: {r.text[:120]}")
             return []
@@ -476,3 +491,211 @@ def export_to_csv(result: dict, filepath: str) -> None:
     df.drop_duplicates(subset=["text"], inplace=True)
     df.to_csv(filepath, index=False, encoding="utf-8-sig")
     print(f"  Exported {len(df)} rows to {filepath}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# FILE UTILITIES
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def versioned_path(directory: str, base_name: str, ext: str) -> str:
+    """
+    Return a file path that does not overwrite an existing file.
+    If <directory>/<base_name><ext> exists, tries <base_name>_1<ext>,
+    <base_name>_2<ext>, ... until a free name is found.
+
+    Example:
+        versioned_path("./data", "iphone_comments", ".csv")
+        -> "./data/iphone_comments.csv"   (if it doesn't exist)
+        -> "./data/iphone_comments_1.csv" (if the first does)
+    """
+    import os
+    candidate = os.path.join(directory, f"{base_name}{ext}")
+    if not os.path.exists(candidate):
+        return candidate
+    n = 1
+    while True:
+        candidate = os.path.join(directory, f"{base_name}_{n}{ext}")
+        if not os.path.exists(candidate):
+            return candidate
+        n += 1
+
+
+def find_local_dataset(topic: str, data_dir: str = "./data/filtered_data"):
+    """
+    Search data_dir for an existing filtered dataset whose filename contains
+    a sanitised version of the topic string (case-insensitive prefix match).
+
+    Returns the path of the NEWEST matching file, or None.
+    """
+    import os, glob as _glob
+
+    if not os.path.isdir(data_dir):
+        return None
+
+    safe = topic.replace(" ", "_").replace("/", "_").lower()[:40]
+    pattern = os.path.join(data_dir, f"combined_{safe}*_filtered*.json")
+    matches = _glob.glob(pattern)
+
+    if not matches:
+        # Wider case-insensitive scan
+        for f in os.listdir(data_dir):
+            if f.lower().endswith(".json") and safe[:10] in f.lower():
+                matches.append(os.path.join(data_dir, f))
+
+    if not matches:
+        return None
+
+    return max(matches, key=os.path.getmtime)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# YOUTUBE FALLBACK SCRAPER
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def scrape_with_youtube(
+    topic: str,
+    keywords: list,
+    min_comments: int = _MIN_COMMENTS,
+) -> dict:
+    """
+    Collect video comments from YouTube Data API v3 when Arctic Shift fails.
+
+    Phase 1 — Search:  GET /v3/search  (up to 4 pages × 50 = 200 videos)
+    Phase 2 — Comments: GET /v3/commentThreads per video (paginates until
+                        min_comments reached or no more pages)
+
+    Returns the same schema as scrape_with_api() so downstream agents need
+    no changes.
+
+    Raises EnvironmentError if YOUTUBE_API_KEY is absent.
+    """
+    import os, requests as _req
+
+    api_key = os.getenv("YOUTUBE_API_KEY", "")
+    if not api_key or api_key.startswith("your_"):
+        raise EnvironmentError(
+            "YOUTUBE_API_KEY not set — add it to your .env file to enable "
+            "the YouTube fallback scraper."
+        )
+
+    SEARCH_URL   = "https://www.googleapis.com/youtube/v3/search"
+    COMMENTS_URL = "https://www.googleapis.com/youtube/v3/commentThreads"
+    SLEEP        = 0.5  # YouTube quota is generous; 0.5s is enough
+
+    # ── Phase 1: collect video IDs ───────────────────────────────────────────
+    query      = topic
+    video_ids  = []
+    page_token = None
+    pages      = 0
+
+    while pages < 4:
+        params = {
+            "key"        : api_key,
+            "q"          : query,
+            "part"       : "id",
+            "type"       : "video",
+            "maxResults" : 50,
+            "relevanceLanguage": "en",
+        }
+        if page_token:
+            params["pageToken"] = page_token
+
+        try:
+            r = _req.get(SEARCH_URL, params=params, timeout=20)
+            time.sleep(SLEEP)
+            if r.status_code != 200:
+                print(f"  YouTube search API {r.status_code}: {r.text[:120]}")
+                break
+            data = r.json()
+            for item in data.get("items", []):
+                vid = item.get("id", {}).get("videoId")
+                if vid:
+                    video_ids.append(vid)
+            page_token = data.get("nextPageToken")
+            pages += 1
+            if not page_token:
+                break
+        except Exception as e:
+            print(f"  YouTube search error: {str(e)[:100]}")
+            break
+
+    print(f"  YouTube: found {len(video_ids)} videos for '{topic}'")
+
+    if not video_ids:
+        return {"comments": [], "comments_count": 0, "posts": [], "source": "youtube"}
+
+    # ── Phase 2: fetch comments from each video ───────────────────────────────
+    all_comments = []
+    kw_lower     = [k.lower() for k in keywords]
+
+    for vid_id in video_ids:
+        if len(all_comments) >= min_comments:
+            break
+
+        page_token = None
+        while True:
+            params = {
+                "key"       : api_key,
+                "videoId"   : vid_id,
+                "part"      : "snippet",
+                "maxResults": 100,
+                "textFormat": "plainText",
+                "order"     : "relevance",
+            }
+            if page_token:
+                params["pageToken"] = page_token
+
+            try:
+                r = _req.get(COMMENTS_URL, params=params, timeout=20)
+                time.sleep(SLEEP)
+
+                if r.status_code == 403:
+                    break  # comments disabled on this video
+                if r.status_code != 200:
+                    break
+
+                data = r.json()
+                for item in data.get("items", []):
+                    snip = item.get("snippet", {}).get("topLevelComment", {}).get("snippet", {})
+                    text = snip.get("textDisplay", "").strip()
+                    if not text:
+                        continue
+
+                    # Keyword relevance filter (same spirit as Reddit local filter)
+                    text_lower = text.lower()
+                    if kw_lower and not any(k in text_lower for k in kw_lower):
+                        continue
+
+                    published = snip.get("publishedAt", "")
+                    try:
+                        ts = datetime.strptime(published[:19], "%Y-%m-%dT%H:%M:%S").timestamp()
+                    except Exception:
+                        ts = time.time()
+
+                    all_comments.append({
+                        "text"      : text,
+                        "author"    : snip.get("authorDisplayName", ""),
+                        "score"     : int(snip.get("likeCount", 0)),
+                        "created_at": ts,
+                        "post_id"   : vid_id,
+                    })
+
+                page_token = data.get("nextPageToken")
+                if not page_token or len(all_comments) >= min_comments:
+                    break
+
+            except Exception as e:
+                print(f"  YouTube comments error (video {vid_id}): {str(e)[:80]}")
+                break
+
+    print(f"  YouTube: collected {len(all_comments)} comments")
+
+    return {
+        "comments"      : all_comments,
+        "comments_count": len(all_comments),
+        "posts"         : [],
+        "posts_count"   : 0,
+        "source"        : "youtube",
+        "target_reached": len(all_comments) >= min_comments,
+        "scraped_at"    : datetime.now().isoformat(),
+    }
