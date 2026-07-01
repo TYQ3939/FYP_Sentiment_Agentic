@@ -38,13 +38,21 @@ def _nice_y_dtick(max_val: int, target_ticks: int = 8) -> int:
     return nice_steps[-1]
 
 
-def generate_timeline_chart(sentiments: List[Dict], use_timestamps: bool = True) -> go.Figure:
+def generate_timeline_chart(
+    sentiments: List[Dict],
+    use_timestamps: bool = True,
+    anomaly_dates: List[Dict] = None,
+) -> go.Figure:
     """
     Generate timeline chart with dynamic time resolution.
 
     Chooses the grouping granularity (hourly / daily / weekly) based on
     the actual span of the data so the chart stays readable even when all
     comments were posted on the same day.
+
+    anomaly_dates: optional list from detect_anomalies()
+        [{date, neg_pct, z_score, ...}, ...]
+        Matching periods get a red triangle-down marker.
     """
 
     if not sentiments:
@@ -94,27 +102,39 @@ def generate_timeline_chart(sentiments: List[Dict], use_timestamps: bool = True)
         span_hours = max((dt_max - dt_min).total_seconds() / 3600, 0)
 
         if span_hours <= 48:
-            # Hourly buckets
-            df["period"] = df["dt"].apply(
-                lambda d: d.strftime("%m-%d %H:00")
-            )
-            title = "Sentiment Timeline (Hourly)"
-            xlabel = "Hour"
-            ylabel = "Count per Hour"
+            df["period"] = df["dt"].apply(lambda d: d.strftime("%m-%d %H:00"))
+            title       = "Sentiment Timeline (Hourly)"
+            xlabel      = "Hour"
+            ylabel      = "Count per Hour"
+            granularity = "hourly"
         elif span_hours <= 24 * 90:
-            # Daily buckets
             df["period"] = df["dt"].apply(lambda d: d.strftime("%Y-%m-%d"))
-            title = "Sentiment Timeline (Daily)"
-            xlabel = "Date"
-            ylabel = "Count per Day"
+            title       = "Sentiment Timeline (Daily)"
+            xlabel      = "Date"
+            ylabel      = "Count per Day"
+            granularity = "daily"
         else:
-            # Weekly buckets — use Monday of each ISO week
             df["period"] = df["dt"].apply(
                 lambda d: (d - timedelta(days=d.weekday())).strftime("%Y-%m-%d")
             )
-            title = "Sentiment Timeline (Weekly)"
-            xlabel = "Week starting"
-            ylabel = "Count per Week"
+            title       = "Sentiment Timeline (Weekly)"
+            xlabel      = "Week starting"
+            ylabel      = "Count per Week"
+            granularity = "weekly"
+
+        # Build date → period mapping for anomaly marker placement
+        date_to_period = {}
+        for rec in records:
+            d    = rec["dt"]
+            dstr = str(d.date())
+            if granularity == "hourly":
+                date_to_period.setdefault(dstr, d.strftime("%m-%d %H:00"))
+            elif granularity == "daily":
+                date_to_period.setdefault(dstr, d.strftime("%Y-%m-%d"))
+            else:
+                date_to_period.setdefault(
+                    dstr, (d - timedelta(days=d.weekday())).strftime("%Y-%m-%d")
+                )
 
         grouped = df.groupby(["period", "sentiment"]).size().unstack(fill_value=0)
 
@@ -157,12 +177,42 @@ def generate_timeline_chart(sentiments: List[Dict], use_timestamps: bool = True)
             grouped["neutral"].max(),
             grouped["negative"].max(),
         ))
-        y_dtick   = _nice_y_dtick(max_count)
-        y_max     = max(y_dtick, (max_count // y_dtick + 1) * y_dtick)
+        y_dtick = _nice_y_dtick(max_count)
+        y_max   = max(y_dtick, (max_count // y_dtick + 1) * y_dtick)
 
-        # Tilt x-axis labels only when there are many periods
+        # ── Anomaly markers ───────────────────────────────────────────────────
+        if anomaly_dates:
+            anom_x, anom_y, anom_text = [], [], []
+            for anom in anomaly_dates:
+                period = date_to_period.get(anom["date"])
+                if period and period in periods:
+                    neg_y = int(grouped.loc[period, "negative"])
+                    anom_x.append(period)
+                    anom_y.append(neg_y + max(1, int(max_count * 0.08)))
+                    anom_text.append(
+                        f"Anomaly {anom['date']}<br>"
+                        f"Neg: {anom['neg_pct']}%  Z={anom['z_score']}"
+                    )
+
+            if anom_x:
+                fig.add_trace(go.Scatter(
+                    x=anom_x,
+                    y=anom_y,
+                    mode="markers",
+                    name="Anomaly",
+                    marker=dict(
+                        symbol="triangle-down",
+                        size=18,
+                        color="red",
+                        opacity=0.9,
+                        line=dict(width=1, color="darkred"),
+                    ),
+                    hovertext=anom_text,
+                    hoverinfo="text",
+                ))
+
         n_periods = len(periods)
-        x_angle = -45 if n_periods > 12 else (-30 if n_periods > 6 else 0)
+        x_angle   = -45 if n_periods > 12 else (-30 if n_periods > 6 else 0)
 
         fig.update_layout(
             title=title,

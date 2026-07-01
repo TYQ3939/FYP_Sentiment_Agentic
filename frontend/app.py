@@ -459,31 +459,99 @@ elif st.session_state.current_tab == "results":
                     # ============ TAB 2: TIMELINE ============
                     with tabs[1]:
                         st.subheader("Sentiment Timeline")
-                        st.info("📈 Shows how sentiment evolved across time periods")
-                        
+                        st.info("Shows how sentiment evolved over time. Red triangles mark unusual negative spikes.")
+
                         try:
-                            # Import directly without path issues
-                            import sys
-                            import os
-                            
-                            # Get the project root directory
-                            project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                            if project_root not in sys.path:
-                                sys.path.insert(0, project_root)
-                            
                             from tools.visualization_tools import generate_timeline_chart
-                            
+                            from tools.rca_tools import detect_anomalies
+
                             detailed_sentiments = analysis_data.get('detailed_sentiments', [])
                             if detailed_sentiments:
-                                fig = generate_timeline_chart(detailed_sentiments)
-                                
+                                anomalies = detect_anomalies(detailed_sentiments)
+                                fig = generate_timeline_chart(
+                                    detailed_sentiments,
+                                    anomaly_dates=anomalies if anomalies else None,
+                                )
+
                                 if fig:
-                                    st.plotly_chart(fig, width='stretch')
+                                    st.plotly_chart(fig, use_container_width=True)
                                 else:
                                     st.warning("Could not generate timeline chart")
+
+                                # ── Root Cause Analysis panel ─────────────
+                                if anomalies:
+                                    st.divider()
+                                    st.subheader("Negative Sentiment Anomalies")
+                                    st.caption(
+                                        f"Found **{len(anomalies)}** date(s) with unusually high negative sentiment "
+                                        "(rolling Z-score >= 2.5). Click a date to investigate."
+                                    )
+
+                                    btn_cols = st.columns(min(3, len(anomalies)))
+                                    for idx, anom in enumerate(anomalies):
+                                        with btn_cols[idx % 3]:
+                                            label = (
+                                                f"{anom['date']}\n"
+                                                f"{anom['neg_pct']}% negative  Z={anom['z_score']}"
+                                            )
+                                            if st.button(label, key=f"rca_btn_{job_id}_{anom['date']}", use_container_width=True):
+                                                st.session_state[f"rca_selected_{job_id}"] = anom["date"]
+
+                                    selected = st.session_state.get(f"rca_selected_{job_id}")
+                                    if selected:
+                                        st.markdown(f"---\n### Root Cause Analysis — {selected}")
+                                        cache_key = f"rca_result_{job_id}_{selected}"
+
+                                        if cache_key not in st.session_state:
+                                            with st.spinner(f"Searching for root cause of {selected} spike..."):
+                                                try:
+                                                    rca_resp = requests.post(
+                                                        f"{API_BASE_URL}/rca/{job_id}",
+                                                        json={"date": selected},
+                                                        timeout=60,
+                                                    )
+                                                    if rca_resp.status_code == 200:
+                                                        st.session_state[cache_key] = rca_resp.json()
+                                                    else:
+                                                        st.error(f"RCA failed: {rca_resp.json().get('detail', 'Unknown error')}")
+                                                except Exception as rca_err:
+                                                    st.error(f"RCA request error: {str(rca_err)[:120]}")
+
+                                        rca = st.session_state.get(cache_key)
+                                        if rca:
+                                            status = rca.get("status", "UNCERTAIN")
+                                            status_colour = {
+                                                "MATCH"    : "green",
+                                                "MISMATCH" : "orange",
+                                                "UNCERTAIN": "blue",
+                                                "NO_DATA"  : "grey",
+                                                "ERROR"    : "red",
+                                            }.get(status, "grey")
+
+                                            col_a, col_b = st.columns([1, 3])
+                                            with col_a:
+                                                st.markdown(
+                                                    f"**Verdict**  \n"
+                                                    f"<span style='color:{status_colour};font-size:1.1em;font-weight:bold'>"
+                                                    f"{status}</span>",
+                                                    unsafe_allow_html=True,
+                                                )
+                                            with col_b:
+                                                aspects = rca.get("aspects_analyzed", [])
+                                                if aspects:
+                                                    st.markdown(f"**Spike aspects:** {', '.join(aspects)}")
+                                                src = rca.get("search_source", "none")
+                                                n   = rca.get("snippets_found", 0)
+                                                st.caption(f"Web search: {n} result(s) via {src}")
+
+                                            st.markdown(f"**Analysis:** {rca.get('reasoning', '—')}")
+                                            st.info(f"**Root Cause:** {rca.get('root_cause_summary', '—')}")
+
+                                elif len(detailed_sentiments) > 0:
+                                    st.caption("Anomaly detection needs at least 14 days of data to work.")
                             else:
                                 st.info("No sentiment data available for timeline")
-                        
+
                         except ImportError as e:
                             st.error(f"Import error: {str(e)}")
                             st.info("Try running from project root: `streamlit run frontend/app.py`")
