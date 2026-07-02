@@ -56,49 +56,171 @@ app = FastAPI(
 
 @app.on_event("startup")
 async def startup_checks():
-    """Validate all required files exist before accepting any requests."""
+    """Check all pipeline dependencies at startup so problems surface immediately."""
     import os
-    ok = True
 
-    print("\n" + "="*60)
-    print(" STARTUP CHECKS")
-    print("="*60)
+    W = 62
+    issues = []
+    warnings_ = []
 
-    # Check model files
+    def ok(label):   print(f"  [OK]   {label}")
+    def miss(label): print(f"  [MISS] {label}"); issues.append(label)
+    def warn(label): print(f"  [WARN] {label}"); warnings_.append(label)
+
+    print("\n" + "=" * W)
+    print("  STARTUP CHECKS")
+    print("=" * W)
+
+    # ── 1. Model files ────────────────────────────────────────
+    print("\n  [1] BERTweet Model Files")
     model_dir = "tools/models/bertweet_finetuned"
-    required_files = {
-        "model.safetensors": "Model weights",
-        "config.json":       "Model config",
-        "tokenizer_config.json": "Tokenizer config",
-        "vocab.txt":         "Vocabulary",
+    for fname in ["model.safetensors", "config.json", "tokenizer_config.json",
+                  "vocab.txt", "special_tokens_map.json", "bpe.codes"]:
+        if os.path.exists(os.path.join(model_dir, fname)):
+            ok(fname)
+        else:
+            miss(f"{fname} missing in {model_dir}")
+
+    # ── 2. GPU / PyTorch ──────────────────────────────────────
+    print("\n  [2] GPU / PyTorch")
+    try:
+        import torch
+        ok(f"torch {torch.__version__}")
+        if torch.cuda.is_available():
+            gpu = torch.cuda.get_device_name(0)
+            mem = torch.cuda.get_device_properties(0).total_memory / 1e9
+            ok(f"CUDA GPU: {gpu} ({mem:.1f} GB)")
+        else:
+            warn("CUDA not available — BERTweet will run on CPU (slower)")
+    except Exception as e:
+        miss(f"torch import failed: {e}")
+
+    # ── 3. Transformers / BERTweet ────────────────────────────
+    print("\n  [3] Transformers")
+    try:
+        from transformers import AutoTokenizer, AutoModelForSequenceClassification
+        ok("transformers (AutoTokenizer, AutoModelForSequenceClassification)")
+    except Exception as e:
+        miss(f"transformers import failed: {e}")
+
+    # ── 4. spaCy + English model ──────────────────────────────
+    print("\n  [4] spaCy")
+    try:
+        import spacy
+        ok(f"spacy {spacy.__version__}")
+        try:
+            spacy.load("en_core_web_sm")
+            ok("en_core_web_sm model loaded")
+        except OSError:
+            warn("en_core_web_sm not found — run: python -m spacy download en_core_web_sm")
+    except Exception as e:
+        miss(f"spacy import failed: {e}")
+
+    # ── 5. NLTK data ──────────────────────────────────────────
+    print("\n  [5] NLTK")
+    try:
+        import nltk
+        nltk.data.find('corpora/stopwords')
+        ok("NLTK stopwords corpus")
+    except LookupError:
+        warn("NLTK stopwords not downloaded — will auto-download on first use")
+    except Exception as e:
+        miss(f"NLTK import failed: {e}")
+
+    # ── 6. BERTopic / ABSA stack ─────────────────────────────
+    print("\n  [6] ABSA Stack (BERTopic + UMAP + HDBSCAN + SentenceTransformers)")
+    try:
+        import bertopic
+        ok(f"bertopic {bertopic.__version__}")
+    except Exception as e:
+        miss(f"bertopic import failed: {e}")
+    try:
+        import umap
+        ok("umap-learn")
+    except Exception as e:
+        miss(f"umap import failed: {e}")
+    try:
+        import hdbscan
+        ok("hdbscan")
+    except Exception as e:
+        miss(f"hdbscan import failed: {e}")
+    try:
+        from sentence_transformers import SentenceTransformer
+        ok("sentence_transformers (SentenceTransformer)")
+        try:
+            from sentence_transformers.models import StaticEmbedding
+            ok("sentence_transformers.models.StaticEmbedding")
+        except ImportError:
+            warn("StaticEmbedding not found — BERTopic will fall back to K-Means (ABSA still works)")
+    except Exception as e:
+        miss(f"sentence_transformers import failed: {e}")
+
+    # ── 7. Wordcloud / Visualization ─────────────────────────
+    print("\n  [7] Visualization")
+    try:
+        from wordcloud import WordCloud
+        ok("wordcloud")
+    except Exception as e:
+        miss(f"wordcloud import failed: {e}")
+    try:
+        import plotly
+        ok(f"plotly {plotly.__version__}")
+    except Exception as e:
+        miss(f"plotly import failed: {e}")
+    try:
+        import matplotlib
+        ok(f"matplotlib {matplotlib.__version__}")
+    except Exception as e:
+        miss(f"matplotlib import failed: {e}")
+
+    # ── 8. LLM / Advisor ─────────────────────────────────────
+    print("\n  [8] LLM Stack (Groq / LangChain)")
+    try:
+        from langchain_groq import ChatGroq
+        ok("langchain_groq (ChatGroq)")
+    except Exception as e:
+        miss(f"langchain_groq import failed: {e}")
+    try:
+        import groq
+        ok(f"groq {groq.__version__}")
+    except Exception as e:
+        miss(f"groq import failed: {e}")
+
+    # ── 9. Environment variables ──────────────────────────────
+    print("\n  [9] Environment Variables")
+    env_checks = {
+        "GROQ_API_KEY":  "Advisor Agent (LLM insights)",
+        "TAVILY_API_KEY": "RCA web search tier 1 (optional)",
+        "SERPER_API_KEY": "RCA web search tier 2 (optional)",
+        "GOOGLE_API_KEY": "RCA web search tier 3 (optional)",
     }
-    for fname, label in required_files.items():
-        path = os.path.join(model_dir, fname)
-        if os.path.exists(path):
-            print(f" [OK]   {label}: {fname}")
-        else:
-            print(f" [MISS] {label} MISSING: {path}")
-            ok = False
-
-    # Check .env API keys
-    required_keys = ["GROQ_API_KEY"]
-    for key in required_keys:
+    for key, usage in env_checks.items():
         if os.environ.get(key):
-            print(f" [OK]   Env: {key}")
+            ok(f"{key}")
         else:
-            print(f" [WARN] Env: {key} not set — Advisor Agent will fail")
+            if key == "GROQ_API_KEY":
+                miss(f"{key} not set — {usage} will FAIL")
+            else:
+                warn(f"{key} not set — {usage}")
 
-    # Check data directories
-    for d in ["data/filtered_data", "data/analysis", "data/raw_data"]:
+    # ── 10. Data directories ──────────────────────────────────
+    print("\n  [10] Data Directories")
+    for d in ["data/filtered_data", "data/analysis", "data/raw_data",
+              "data/processed_data"]:
         os.makedirs(d, exist_ok=True)
+        ok(d)
 
-    print("="*60)
-    if not ok:
-        print(" [WARN] Some model files are missing — analysis jobs will fail.")
-        print("        Upload missing files to:", os.path.abspath(model_dir))
+    # ── Summary ───────────────────────────────────────────────
+    print("\n" + "=" * W)
+    if issues:
+        print(f"  [FAIL] {len(issues)} critical issue(s) — fix before running jobs:")
+        for i in issues:
+            print(f"         - {i}")
     else:
-        print(" [OK]  All checks passed — backend ready.")
-    print("="*60 + "\n")
+        print(f"  [OK]  All critical checks passed — backend ready.")
+    if warnings_:
+        print(f"  [WARN] {len(warnings_)} warning(s) — non-fatal but may affect features.")
+    print("=" * W + "\n")
 
 # Enable CORS for Streamlit frontend
 app.add_middleware(

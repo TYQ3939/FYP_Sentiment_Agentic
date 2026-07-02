@@ -710,7 +710,7 @@ elif st.session_state.current_tab == "results":
                                     # Overall wordcloud at the top
                                     if "overall" in wordclouds:
                                         st.subheader("Overall Wordcloud")
-                                        st.image(wordclouds["overall"], use_container_width=True)
+                                        st.image(wordclouds["overall"], use_column_width=True)
 
                                     st.divider()
 
@@ -730,7 +730,7 @@ elif st.session_state.current_tab == "results":
                                         key = f"positive_{pos_key}"
                                         st.subheader("😊 Positive")
                                         if key in wordclouds:
-                                            st.image(wordclouds[key], use_container_width=True)
+                                            st.image(wordclouds[key], use_column_width=True)
                                         else:
                                             st.info("Not enough data")
 
@@ -738,7 +738,7 @@ elif st.session_state.current_tab == "results":
                                         key = f"neutral_{pos_key}"
                                         st.subheader("😐 Neutral")
                                         if key in wordclouds:
-                                            st.image(wordclouds[key], use_container_width=True)
+                                            st.image(wordclouds[key], use_column_width=True)
                                         else:
                                             st.info("Not enough data")
 
@@ -746,7 +746,7 @@ elif st.session_state.current_tab == "results":
                                         key = f"negative_{pos_key}"
                                         st.subheader("😞 Negative")
                                         if key in wordclouds:
-                                            st.image(wordclouds[key], use_container_width=True)
+                                            st.image(wordclouds[key], use_column_width=True)
                                         else:
                                             st.info("Not enough data")
                                 else:
@@ -1257,13 +1257,13 @@ elif st.session_state.current_tab == "compare_results":
                             with col_l:
                                 st.caption(topic_a)
                                 if key in wc_a:
-                                    st.image(wc_a[key], use_container_width=True)
+                                    st.image(wc_a[key], use_column_width=True)
                                 else:
                                     st.info("Not enough data")
                             with col_r:
                                 st.caption(topic_b)
                                 if key in wc_b:
-                                    st.image(wc_b[key], use_container_width=True)
+                                    st.image(wc_b[key], use_column_width=True)
                                 else:
                                     st.info("Not enough data")
                             st.divider()
@@ -1276,7 +1276,7 @@ elif st.session_state.current_tab == "compare_results":
 
                         if "overall" in wc_sel:
                             st.subheader("Overall")
-                            st.image(wc_sel["overall"], use_container_width=True)
+                            st.image(wc_sel["overall"], use_column_width=True)
                             st.divider()
 
                         pos_filter = st.radio(
@@ -1297,7 +1297,7 @@ elif st.session_state.current_tab == "compare_results":
                                 st.subheader(emoji)
                                 key = f"{sentiment}_{pos_key}"
                                 if key in wc_sel:
-                                    st.image(wc_sel[key], use_container_width=True)
+                                    st.image(wc_sel[key], use_column_width=True)
                                 else:
                                     st.info("Not enough data")
 
