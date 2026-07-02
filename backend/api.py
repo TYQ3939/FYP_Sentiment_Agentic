@@ -54,6 +54,52 @@ app = FastAPI(
     version="1.0.0"
 )
 
+@app.on_event("startup")
+async def startup_checks():
+    """Validate all required files exist before accepting any requests."""
+    import os
+    ok = True
+
+    print("\n" + "="*60)
+    print(" STARTUP CHECKS")
+    print("="*60)
+
+    # Check model files
+    model_dir = "tools/models/bertweet_finetuned"
+    required_files = {
+        "model.safetensors": "Model weights",
+        "config.json":       "Model config",
+        "tokenizer_config.json": "Tokenizer config",
+        "vocab.txt":         "Vocabulary",
+    }
+    for fname, label in required_files.items():
+        path = os.path.join(model_dir, fname)
+        if os.path.exists(path):
+            print(f" [OK]   {label}: {fname}")
+        else:
+            print(f" [MISS] {label} MISSING: {path}")
+            ok = False
+
+    # Check .env API keys
+    required_keys = ["GROQ_API_KEY"]
+    for key in required_keys:
+        if os.environ.get(key):
+            print(f" [OK]   Env: {key}")
+        else:
+            print(f" [WARN] Env: {key} not set — Advisor Agent will fail")
+
+    # Check data directories
+    for d in ["data/filtered_data", "data/analysis", "data/raw_data"]:
+        os.makedirs(d, exist_ok=True)
+
+    print("="*60)
+    if not ok:
+        print(" [WARN] Some model files are missing — analysis jobs will fail.")
+        print("        Upload missing files to:", os.path.abspath(model_dir))
+    else:
+        print(" [OK]  All checks passed — backend ready.")
+    print("="*60 + "\n")
+
 # Enable CORS for Streamlit frontend
 app.add_middleware(
     CORSMiddleware,
