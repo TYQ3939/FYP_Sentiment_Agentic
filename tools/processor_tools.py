@@ -1,6 +1,8 @@
 """Data processing tools for cleaning and preparing data."""
 
 import re
+import sys
+import os
 import spacy
 import nltk
 from nltk.corpus import stopwords
@@ -9,11 +11,20 @@ import warnings
 
 warnings.filterwarnings('ignore')
 
+# Persist NLTK data in /workspace on RunPod so it survives container restarts
+_nltk_dir = '/workspace/nltk_data'
+if os.path.isdir('/workspace'):
+    os.makedirs(_nltk_dir, exist_ok=True)
+    if _nltk_dir not in nltk.data.path:
+        nltk.data.path.insert(0, _nltk_dir)
+else:
+    _nltk_dir = None
+
 # Download required NLTK data
 try:
     nltk.data.find('corpora/stopwords')
 except LookupError:
-    nltk.download('stopwords', quiet=True)
+    nltk.download('stopwords', quiet=True, download_dir=_nltk_dir)
 
 # Load spaCy model
 try:
@@ -21,7 +32,7 @@ try:
 except OSError:
     print("Installing spaCy model...")
     import subprocess
-    subprocess.run(["python", "-m", "spacy", "download", "en_core_web_sm"], 
+    subprocess.run([sys.executable, "-m", "spacy", "download", "en_core_web_sm"],
                    check=False, capture_output=True)
     try:
         nlp = spacy.load("en_core_web_sm")

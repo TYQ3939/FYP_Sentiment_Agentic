@@ -1,6 +1,7 @@
 """Comprehensive visualization tools for sentiment analysis - Streamlit compatible."""
 
 import os
+import sys
 import json
 from typing import List, Dict
 from datetime import datetime
@@ -538,8 +539,8 @@ def perform_aspect_level_sentiment_analysis(processed_data: List[Dict],
         except OSError:
             print("⚠️ Installing spaCy model...")
             import subprocess
-            subprocess.run(["python", "-m", "spacy", "download", "en_core_web_sm"], 
-                         check=False, capture_output=True)
+            subprocess.run([sys.executable, "-m", "spacy", "download", "en_core_web_sm"],
+                           check=False, capture_output=True)
             nlp = spacy.load("en_core_web_sm")
         
         aspects_sentiment = {}

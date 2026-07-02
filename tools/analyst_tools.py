@@ -505,7 +505,7 @@ def discover_aspects_kmeans_ctfidf(texts: List[str], sentiments: List[Dict]) -> 
                 _nlp = spacy.load("en_core_web_sm")
             except OSError:
                 import subprocess
-                subprocess.run(["python", "-m", "spacy", "download", "en_core_web_sm"],
+                subprocess.run([sys.executable, "-m", "spacy", "download", "en_core_web_sm"],
                                check=False, capture_output=True)
                 _nlp = spacy.load("en_core_web_sm")
 
