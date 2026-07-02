@@ -5,10 +5,11 @@ import json
 class AdvisorAgent(BaseAgent):
     """Generates LLM-powered per-section insights and handles follow-up Q&A."""
 
-    def __init__(self):
+    def __init__(self, job_id=None):
         super().__init__(
             "AdvisorAgent",
             "You are an advisor agent that provides strategic insights based on Reddit sentiment analysis.",
+            job_id=job_id,
         )
 
     # ── main pipeline step ────────────────────────────────────────────────────

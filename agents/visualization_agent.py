@@ -4,10 +4,11 @@ import json
 class VisualizationAgent(BaseAgent):
     """Visualization Agent that prepares all visualization data."""
     
-    def __init__(self):
+    def __init__(self, job_id=None):
         super().__init__(
             "VisualizationAgent",
-            "You are a visualization agent that prepares data insights for visual presentation."
+            "You are a visualization agent that prepares data insights for visual presentation.",
+            job_id=job_id,
         )
 
     def run(self) -> dict:

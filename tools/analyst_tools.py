@@ -15,19 +15,19 @@ _tokenizer = None
 _device = None
 
 print("\n" + "="*70)
-print("🔧 SENTIMENT ANALYZER INITIALIZATION")
+print("[INIT] SENTIMENT ANALYZER INITIALIZATION")
 print("="*70)
 
 # Check GPU availability
 if torch.cuda.is_available():
     _device = "cuda"
-    print(f"✅ CUDA Available")
+    print(f"[OK] CUDA Available")
     print(f"   GPU: {torch.cuda.get_device_name(0)}")
     print(f"   CUDA Version: {torch.version.cuda}")
     print(f"   GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
 else:
     _device = "cpu"
-    print(f"⚠️  GPU NOT available - using CPU (slower)")
+    print(f"[WARN] GPU NOT available - using CPU (slower)")
     print(f"   PyTorch Version: {torch.__version__}")
     if "+cpu" in torch.__version__:
         print(f"   Your PyTorch is CPU-only build!")
@@ -84,12 +84,12 @@ def initialize_model():
         model_path = os.path.join(script_dir, "models", "bertweet_finetuned")
         
         print(f"\n{'='*70}")
-        print(f"📦 LOADING FINE-TUNED BERTWEET MODEL")
+        print(f"[LOAD] LOADING FINE-TUNED BERTWEET MODEL")
         print(f"{'='*70}")
         print(f"Model Path: {model_path}")
-        
+
         if not os.path.exists(model_path):
-            print(f"\n❌ Model directory not found: {model_path}")
+            print(f"\n[ERROR] Model directory not found: {model_path}")
             print(f"\nTo set up your model:")
             print(f"   1. Save your fine-tuned BERTweet model:")
             print(f"      from transformers import AutoModelForSequenceClassification, AutoTokenizer")
@@ -101,45 +101,45 @@ def initialize_model():
         # Check for required files
         model_file, tokenizer_files = _find_model_files(model_path)
         
-        print(f"\n✓ Checking model files:")
+        print(f"\n[..] Checking model files:")
         if model_file:
-            print(f"   ✓ Model file found: {os.path.basename(model_file)}")
+            print(f"   [OK] Model file found: {os.path.basename(model_file)}")
         else:
-            print(f"   ❌ No model file found (pytorch_model.bin, model.bin, or model.safetensors)")
+            print(f"   [ERROR] No model file found (pytorch_model.bin, model.bin, or model.safetensors)")
             raise FileNotFoundError(f"No model file found in {model_path}")
-        
+
         if tokenizer_files:
-            print(f"   ✓ Tokenizer files found: {len(tokenizer_files)} file(s)")
+            print(f"   [OK] Tokenizer files found: {len(tokenizer_files)} file(s)")
         else:
-            print(f"   ❌ No tokenizer files found")
+            print(f"   [ERROR] No tokenizer files found")
             raise FileNotFoundError(f"No tokenizer files found in {model_path}")
-        
-        print(f"\n✓ Loading tokenizer...")
-        
+
+        print(f"\n[..] Loading tokenizer...")
+
         # Load tokenizer
         _tokenizer = AutoTokenizer.from_pretrained(model_path)
-        print(f"✓ Tokenizer loaded: {type(_tokenizer).__name__}")
-        
-        print(f"✓ Loading model (this may take a moment)...")
-        
+        print(f"[OK] Tokenizer loaded: {type(_tokenizer).__name__}")
+
+        print(f"[..] Loading model (this may take a moment)...")
+
         # Load model on CPU first to avoid OOM on GPU
         _model = AutoModelForSequenceClassification.from_pretrained(model_path)
-        
-        print(f"✓ Model loaded")
+
+        print(f"[OK] Model loaded")
         print(f"   Model Type: {_model.config.model_type.upper()}")
         print(f"   Architecture: {type(_model).__name__}")
         print(f"   Num Labels: {_model.config.num_labels}")
         print(f"   Hidden Size: {_model.config.hidden_size}")
-        
+
         # Move model to device (GPU or CPU)
-        print(f"\n✓ Moving model to device: {_device.upper()}")
-        
+        print(f"\n[..] Moving model to device: {_device.upper()}")
+
         try:
             _model = _model.to(_device)
-            
+
             # Set to evaluation mode
             _model.eval()
-            
+
             # Log device memory for GPU
             if _device == "cuda":
                 torch.cuda.synchronize()  # Ensure operations are complete
@@ -147,21 +147,21 @@ def initialize_model():
                 reserved = torch.cuda.memory_reserved() / 1024**3
                 print(f"   GPU Memory Allocated: {allocated:.2f} GB")
                 print(f"   GPU Memory Reserved: {reserved:.2f} GB")
-        
+
         except RuntimeError as e:
-            print(f"⚠️  GPU error occurred: {str(e)}")
+            print(f"[WARN] GPU error occurred: {str(e)}")
             print(f"   Falling back to CPU")
             _device = "cpu"
             _model = _model.to(_device)
             _model.eval()
-        
-        print(f"\n✅ Fine-tuned BERTweet model loaded successfully on {_device.upper()}!")
+
+        print(f"\n[OK] Fine-tuned BERTweet model loaded successfully on {_device.upper()}!")
         print(f"{'='*70}\n")
-        
+
         return _model, _tokenizer, _device
-    
+
     except Exception as e:
-        print(f"\n❌ FAILED to load model:")
+        print(f"\n[FAILED] FAILED to load model:")
         print(f"   Error: {str(e)}")
         print(f"\nDiagnostics:")
         print(f"   Run: python tools/check_model_setup.py")
@@ -203,7 +203,7 @@ def analyze_sentiment_batch(texts: List[str], batch_size: int = None) -> Dict:
     
     try:
         print(f"\n{'='*70}")
-        print(f"🔍 ANALYZING SENTIMENT ({len(texts)} texts)")
+        print(f"[ANALYZING] SENTIMENT ({len(texts)} texts)")
         print(f"{'='*70}")
         print(f"Device: {device.upper()}")
         print(f"Batch Size: {batch_size}")
@@ -263,7 +263,7 @@ def analyze_sentiment_batch(texts: List[str], batch_size: int = None) -> Dict:
             
             except RuntimeError as e:
                 if "out of memory" in str(e).lower():
-                    print(f"⚠️  GPU Out of Memory error in batch {batch_idx//batch_size + 1}")
+                    print(f"[WARN] GPU Out of Memory error in batch {batch_idx//batch_size + 1}")
                     print(f"   Reducing batch size and retrying...")
                     if device == "cuda":
                         torch.cuda.empty_cache()
@@ -315,14 +315,14 @@ def analyze_sentiment_batch(texts: List[str], batch_size: int = None) -> Dict:
                     raise
     
     except Exception as e:
-        print(f"❌ Error in sentiment analysis: {str(e)}")
+        print(f"[ERROR] Error in sentiment analysis: {str(e)}")
 
         # Ensure cleanup happens even on error
         try:
             if device == "cuda":
                 cleanup_gpu_memory()
         except Exception as cleanup_error:
-            print(f"⚠️  Error during cleanup after failure: {str(cleanup_error)}")
+            print(f"[WARN] Error during cleanup after failure: {str(cleanup_error)}")
 
         raise
     
@@ -345,9 +345,9 @@ def analyze_sentiment_batch(texts: List[str], batch_size: int = None) -> Dict:
         else:
             overall = "positive" if positive_count >= negative_count else "negative"
         
-        print(f"\n{'─'*70}")
-        print(f"📊 SENTIMENT ANALYSIS RESULTS")
-        print(f"{'─'*70}")
+        print(f"\n{'='*70}")
+        print(f"[RESULTS] SENTIMENT ANALYSIS RESULTS")
+        print(f"{'='*70}")
         print(f"Total Texts Analyzed: {total}")
         print(f"Positive: {positive_count:,} ({(positive_count/total*100):.1f}%)")
         print(f"Neutral: {neutral_count:,} ({(neutral_count/total*100):.1f}%)")
@@ -368,9 +368,9 @@ def analyze_sentiment_batch(texts: List[str], batch_size: int = None) -> Dict:
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
 
-        print("✅ GPU memory cleaned up")
+        print("[OK] GPU memory cleaned up")
     except Exception as e:
-        print(f"⚠️  Error during GPU cleanup: {str(e)}")
+        print(f"[WARN] Error during GPU cleanup: {str(e)}")
 
     return {
         "sentiments": sentiments,
@@ -423,7 +423,7 @@ def discover_aspects_kmeans_ctfidf(texts: List[str], sentiments: List[Dict]) -> 
 
     MIN_DOCS = 6
     if len(clean_texts) < MIN_DOCS:
-        print(f"  [ABSA] Only {len(clean_texts)} usable texts (need {MIN_DOCS}) — skipping")
+        print(f"  [ABSA] Only {len(clean_texts)} usable texts (need {MIN_DOCS}) - skipping")
         return {}
 
     try:
@@ -433,14 +433,16 @@ def discover_aspects_kmeans_ctfidf(texts: List[str], sentiments: List[Dict]) -> 
         from sklearn.feature_extraction.text import TfidfVectorizer
 
         # ── Phase 2: sentence embeddings ─────────────────────────────────────
+        # Force CPU: BERTweet already occupies GPU VRAM for sentiment analysis;
+        # competing for the same device causes OOM and corrupts the CUDA context.
         try:
             from sentence_transformers import SentenceTransformer
-            print("  [ABSA] Encoding with all-MiniLM-L6-v2 …")
-            embeddings = SentenceTransformer("all-MiniLM-L6-v2").encode(
-                clean_texts, show_progress_bar=False, batch_size=64
+            print("  [ABSA] Encoding with all-MiniLM-L6-v2 (CPU) ...")
+            embeddings = SentenceTransformer("all-MiniLM-L6-v2", device="cpu").encode(
+                clean_texts, show_progress_bar=False, batch_size=32
             )
         except ImportError:
-            print("  [ABSA] sentence-transformers not installed — using TF-IDF fallback")
+            print("  [ABSA] sentence-transformers not installed - using TF-IDF fallback")
             embeddings = TfidfVectorizer(max_features=384, sublinear_tf=True) \
                              .fit_transform(clean_texts).toarray()
 
@@ -536,13 +538,13 @@ def discover_aspects_kmeans_ctfidf(texts: List[str], sentiments: List[Dict]) -> 
                 "negative"      : {"count": neg, "percentage": (neg / total * 100) if total else 0},
                 "total_mentions": total,
             }
-            print(f"  [ABSA] Cluster {cid} → '{label}'  ({total} comments)")
+            print(f"  [ABSA] Cluster {cid} -> '{label}'  ({total} comments)")
 
         return dict(sorted(aspect_analysis.items(), key=lambda x: -x[1]["total_mentions"]))
 
     except Exception as exc:
         import traceback
-        print(f"⚠️ ABSA clustering failed: {exc}")
+        print(f"[WARN] ABSA clustering failed: {exc}")
         print(traceback.format_exc())
         return {}
 
@@ -627,7 +629,7 @@ def discover_aspects_bertopic(texts: List[str], sentiments: List[Dict]) -> Dict:
 
     MIN_DOCS = 10
     if len(clean_texts) < MIN_DOCS:
-        print(f"  [ABSA] Only {len(clean_texts)} usable texts (need {MIN_DOCS}) — skipping")
+        print(f"  [ABSA] Only {len(clean_texts)} usable texts (need {MIN_DOCS}) - skipping")
         return {}
 
     try:
@@ -638,11 +640,13 @@ def discover_aspects_bertopic(texts: List[str], sentiments: List[Dict]) -> Dict:
         from sklearn.feature_extraction.text import CountVectorizer
         from collections import defaultdict
 
-        # ── Phase 2: embed with all-MiniLM-L6-v2 ────────────────────────────
-        print(f"  [ABSA-BERTopic] Encoding {len(clean_texts)} docs with all-MiniLM-L6-v2...")
-        embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+        # ── Phase 2: embed with all-MiniLM-L6-v2 (CPU) ──────────────────────
+        # Force CPU: BERTweet already occupies GPU VRAM; sharing it causes OOM
+        # which corrupts the CUDA context and breaks the K-Means fallback too.
+        print(f"  [ABSA-BERTopic] Encoding {len(clean_texts)} docs with all-MiniLM-L6-v2 (CPU)...")
+        embedding_model = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
         embeddings = embedding_model.encode(
-            clean_texts, show_progress_bar=False, batch_size=64
+            clean_texts, show_progress_bar=False, batch_size=32
         )
 
         # ── Phase 3+4: UMAP → HDBSCAN via BERTopic ───────────────────────────
@@ -749,6 +753,13 @@ def discover_aspects_bertopic(texts: List[str], sentiments: List[Dict]) -> Dict:
         import traceback
         print(f"  [ABSA-BERTopic] Failed: {exc}")
         print(traceback.format_exc())
+        # Free any GPU memory held by the failed BERTopic run before falling back
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
         print(f"  [ABSA-BERTopic] Falling back to K-Means + c-TF-IDF...")
         return discover_aspects_kmeans_ctfidf(texts, sentiments)
 
@@ -865,7 +876,7 @@ Rules:
         start = text.find("{")
         end   = text.rfind("}") + 1
         if start == -1 or end <= start:
-            print("  [ABSA-LLM] Could not parse JSON — keeping raw aspects")
+            print("  [ABSA-LLM] Could not parse JSON - keeping raw aspects")
             result = _strip_top_words(raw_aspects)
             if others_data:
                 result["Others"] = {k: v for k, v in others_data.items() if k != "_top_words"}
@@ -908,7 +919,7 @@ Rules:
         return result
 
     except Exception as exc:
-        print(f"  [ABSA-LLM] Verification failed ({str(exc)[:100]}) — keeping raw aspects")
+        print(f"  [ABSA-LLM] Verification failed ({str(exc)[:100]}) - keeping raw aspects")
         result = _strip_top_words(raw_aspects)
         if others_data:
             result["Others"] = {k: v for k, v in others_data.items() if k != "_top_words"}
@@ -932,7 +943,7 @@ def prepare_for_aspect_analysis(texts: List[str]) -> Dict:
         try:
             nlp = spacy.load("en_core_web_sm")
         except OSError:
-            print("⚠️ Installing spaCy model...")
+            print("[..] Installing spaCy model...")
             import subprocess
             subprocess.run(["python", "-m", "spacy", "download", "en_core_web_sm"], 
                          check=False, capture_output=True)
@@ -960,7 +971,7 @@ def prepare_for_aspect_analysis(texts: List[str]) -> Dict:
         }
     
     except Exception as e:
-        print(f"⚠️ Could not prepare aspect analysis: {str(e)}")
+        print(f"[WARN] Could not prepare aspect analysis: {str(e)}")
         return {
             "aspects": [],
             "aspect_texts": {},
@@ -1004,9 +1015,9 @@ def cleanup_gpu_memory():
             # Final synchronization
             torch.cuda.synchronize()
 
-            print("✅ GPU memory cleaned up")
+            print("[OK] GPU memory cleaned up")
         except Exception as e:
-            print(f"⚠️  Error during GPU cleanup: {str(e)}")
+            print(f"[WARN] Error during GPU cleanup: {str(e)}")
 
 
 def reset_model():
@@ -1023,7 +1034,7 @@ def reset_model():
                 try:
                     _model = _model.cpu()
                 except Exception as e:
-                    print(f"⚠️  Could not move model to CPU: {str(e)}")
+                    print(f"[WARN] Could not move model to CPU: {str(e)}")
 
             # Delete model reference
             del _model
@@ -1037,10 +1048,10 @@ def reset_model():
         if _device == "cuda":
             cleanup_gpu_memory()
 
-        print("✅ Model and tokenizer unloaded from memory")
+        print("[OK] Model and tokenizer unloaded from memory")
 
     except Exception as e:
-        print(f"⚠️  Error during model reset: {str(e)}")
+        print(f"[WARN] Error during model reset: {str(e)}")
         _model = None
         _tokenizer = None
-        print(f"⚠️  Error cleaning GPU: {str(e)}")
+        print(f"[WARN] Error cleaning GPU: {str(e)}")

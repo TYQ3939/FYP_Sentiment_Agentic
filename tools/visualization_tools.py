@@ -754,3 +754,70 @@ def generate_aspect_sentiment_chart(aspect_analysis: Dict) -> go.Figure:
     except Exception as e:
         print(f"Error in generate_aspect_sentiment_chart: {str(e)}")
         return None
+
+
+def generate_absa_heatmap(aspect_analysis: Dict, topic: str = "") -> go.Figure:
+    """
+    Heatmap for Compare Mode: aspect rows × sentiment columns, cells show %.
+    X-axis: Positive | Neutral | Negative
+    Y-axis: top 9 named aspects + Others at end
+    Cell color: white (0%) → yellow → red (100%)
+    """
+    if not aspect_analysis:
+        return None
+
+    try:
+        others_data   = aspect_analysis.get("Others")
+        named_aspects = [a for a in aspect_analysis if a != "Others"][:9]
+        aspects       = named_aspects + (["Others"] if others_data else [])
+
+        if not aspects:
+            return None
+
+        sentiments = ["Positive", "Neutral", "Negative"]
+        z_vals, text_vals = [], []
+        for aspect in aspects:
+            data = aspect_analysis.get(aspect, {})
+            row_z = [
+                round(data.get("positive", {}).get("percentage", 0), 1),
+                round(data.get("neutral",  {}).get("percentage", 0), 1),
+                round(data.get("negative", {}).get("percentage", 0), 1),
+            ]
+            z_vals.append(row_z)
+            text_vals.append([f"{v:.0f}%" for v in row_z])
+
+        colorscale = [
+            [0.00, "#f8f9fa"],
+            [0.33, "#f7dc6f"],
+            [0.66, "#e67e22"],
+            [1.00, "#e74c3c"],
+        ]
+
+        fig = go.Figure(data=go.Heatmap(
+            z=z_vals,
+            x=sentiments,
+            y=aspects,
+            colorscale=colorscale,
+            text=text_vals,
+            texttemplate="%{text}",
+            textfont={"size": 11},
+            hovertemplate="Aspect: %{y}<br>Sentiment: %{x}<br>%{z:.1f}%<extra></extra>",
+            zmin=0,
+            zmax=100,
+            showscale=True,
+            colorbar=dict(title="% Comments", thickness=12, len=0.7),
+        ))
+
+        fig.update_layout(
+            title=topic or "Aspect Sentiment Heatmap",
+            xaxis_title="Sentiment",
+            yaxis_title="Aspect",
+            height=max(320, 80 + len(aspects) * 38),
+            margin=dict(l=130, r=40, t=60, b=40),
+        )
+
+        return fig
+
+    except Exception as exc:
+        print(f"Error in generate_absa_heatmap: {str(exc)}")
+        return None

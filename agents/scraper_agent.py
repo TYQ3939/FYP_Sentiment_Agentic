@@ -20,10 +20,11 @@ class ScraperAgent(BaseAgent):
       2. Local cached dataset (data/filtered_data/combined_<topic>_filtered*.json)
     """
 
-    def __init__(self):
+    def __init__(self, job_id=None):
         super().__init__(
             "ScraperAgent",
             "You are a data scraper agent that collects social media data.",
+            job_id=job_id,
         )
 
     def run(self, user_request: str) -> dict:

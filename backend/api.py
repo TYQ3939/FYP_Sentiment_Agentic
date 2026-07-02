@@ -21,6 +21,7 @@ from backend.tasks import process_scraping_job
 class ScrapeRequest(BaseModel):
     topic: str
     subreddits: Optional[List[str]] = None
+    mode: str = "single"   # "single" or "compare"
 
 class RCARequest(BaseModel):
     date: str  # YYYY-MM-DD of the anomaly to investigate
@@ -108,7 +109,7 @@ async def start_scrape(request: ScrapeRequest, background_tasks: BackgroundTasks
 
         # Queue heavy processing in background task (NOT blocking the endpoint)
         # This returns immediately while the task runs separately
-        background_tasks.add_task(process_scraping_job, job_id, request.topic, subreddits)
+        background_tasks.add_task(process_scraping_job, job_id, request.topic, subreddits, request.mode)
 
         print(f"[QUEUED] Job {job_id} queued for background processing")
 
