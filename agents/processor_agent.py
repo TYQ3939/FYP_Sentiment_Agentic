@@ -6,10 +6,11 @@ import glob
 class ProcessorAgent(BaseAgent):
     """Processor Agent that cleans and processes raw data."""
     
-    def __init__(self):
+    def __init__(self, job_id=None):
         super().__init__(
             "ProcessorAgent",
-            "You are a data processor agent that cleans and prepares data for analysis."
+            "You are a data processor agent that cleans and prepares data for analysis.",
+            job_id=job_id,
         )
 
     def run(self) -> dict:

@@ -496,3 +496,92 @@ def generate_suggested_questions(aspect_analysis: Dict, topic: str) -> List[str]
             "What are the common complaints?",
             "Is this worth it based on Reddit discussions?",
         ]
+
+
+# ─── compare mode ─────────────────────────────────────────────────────────────
+
+def generate_compare_insight(
+    topic_a: str,
+    sentiment_a: dict,
+    aspects_a: dict,
+    topic_b: str,
+    sentiment_b: dict,
+    aspects_b: dict,
+    llm,
+) -> str:
+    """
+    Generate a competitive benchmark synthesis report comparing two topics.
+    Returns markdown text with three sections:
+      # Competitive Edge
+      # System Vulnerabilities
+      # Market Sentiment Verdict
+    """
+
+    def _dist_line(topic, sr):
+        d    = sr.get("sentiment_distribution", {})
+        pos  = d.get("positive", {}).get("percentage", 0)
+        neu  = d.get("neutral",  {}).get("percentage", 0)
+        neg  = d.get("negative", {}).get("percentage", 0)
+        ov   = sr.get("overall_sentiment", "N/A").upper()
+        conf = sr.get("confidence", 0)
+        n    = sr.get("total_texts_analyzed", 0)
+        return (
+            f"{topic}: {ov} ({conf:.0%} confidence, {n} texts)\n"
+            f"  Positive {pos:.1f}%  Neutral {neu:.1f}%  Negative {neg:.1f}%"
+        )
+
+    def _aspects_block(aspects, top_n=6):
+        rows = sorted(
+            [(k, v) for k, v in aspects.items() if k != "Others"],
+            key=lambda x: x[1].get("total_mentions", 0), reverse=True
+        )[:top_n]
+        lines = []
+        for name, data in rows:
+            pos = data.get("positive", {}).get("percentage", 0)
+            neg = data.get("negative", {}).get("percentage", 0)
+            mentions = data.get("total_mentions", 0)
+            lines.append(f"  {name}: {pos:.0f}% pos / {neg:.0f}% neg ({mentions} mentions)")
+        return "\n".join(lines) if lines else "  (no aspects identified)"
+
+    context = (
+        "=== Sentiment Overview ===\n"
+        f"{_dist_line(topic_a, sentiment_a)}\n"
+        f"{_dist_line(topic_b, sentiment_b)}\n\n"
+        f"=== Top Aspects — {topic_a} ===\n{_aspects_block(aspects_a)}\n\n"
+        f"=== Top Aspects — {topic_b} ===\n{_aspects_block(aspects_b)}"
+    )
+
+    prompt = (
+        f"You are a competitive market analyst reviewing Reddit sentiment data.\n"
+        f"Topic A: {topic_a}\n"
+        f"Topic B: {topic_b}\n\n"
+        f"Data:\n{context}\n\n"
+        f"Write a benchmark synthesis report using EXACTLY these three markdown section headers:\n\n"
+        f"# Competitive Edge\n"
+        f"2-3 bullet points identifying where one topic clearly outperforms the other "
+        f"based on specific sentiment percentages and aspect scores.\n\n"
+        f"# System Vulnerabilities\n"
+        f"2-3 bullet points spotlighting the most critical weaknesses or recurring "
+        f"complaint patterns for each topic.\n\n"
+        f"# Market Sentiment Verdict\n"
+        f"1 short paragraph concluding which topic currently dominates public "
+        f"perception and why, based only on the data.\n\n"
+        f"Rules:\n"
+        f"- Use **bold** for specific numbers, topic names, and key aspects\n"
+        f"- Start bullet points with '• '\n"
+        f"- Be specific — cite percentages and aspect names from the data\n"
+        f"- Write for a general audience, not corporate executives\n"
+        f"- Output only the three sections, no extra text."
+    )
+
+    fallback = (
+        f"# Competitive Edge\n"
+        f"• Comparison between **{topic_a}** and **{topic_b}** loaded — "
+        f"review the individual tabs for detailed breakdowns.\n\n"
+        f"# System Vulnerabilities\n"
+        f"• Check each topic's Aspect Analysis tab for complaint patterns.\n\n"
+        f"# Market Sentiment Verdict\n"
+        f"Unable to generate verdict — LLM unavailable at this time."
+    )
+
+    return _call_llm_safe(llm, prompt, fallback=fallback)

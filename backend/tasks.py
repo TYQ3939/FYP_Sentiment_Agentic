@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import List
 import json
 
+from agents.base_agent import BaseAgent
 from agents.scraper_agent import ScraperAgent
 from agents.processor_agent import ProcessorAgent
 from agents.analyst_agent import AnalystAgent
@@ -14,7 +15,7 @@ from agents.visualization_agent import VisualizationAgent
 from backend.database import db
 
 
-def process_scraping_job(job_id: str, topic: str, subreddits: List[str]):
+def process_scraping_job(job_id: str, topic: str, subreddits: List[str], mode: str = "single"):
     """
     Process a scraping job in a background thread.
     
@@ -34,9 +35,13 @@ def process_scraping_job(job_id: str, topic: str, subreddits: List[str]):
     try:
         # Update job status
         db.update_job(job_id, status="running", started_at=datetime.now().isoformat())
-        
+
+        # Register this job's namespace in shared_state.json before any agent runs.
+        # Sets the mode field so agents know whether this is a single or compare run.
+        BaseAgent.register_job(job_id, topic, mode)
+
         print(f"\n{'='*60}")
-        print(f"[START] Starting job {job_id}")
+        print(f"[START] Starting job {job_id} (mode={mode})")
         print(f"{'='*60}")
 
         # Step 1: Scrape data
@@ -44,7 +49,7 @@ def process_scraping_job(job_id: str, topic: str, subreddits: List[str]):
         db.update_job(job_id, progress=20)
         
         try:
-            scraper = ScraperAgent()
+            scraper = ScraperAgent(job_id=job_id)
             scraper_result = scraper.run(f"Collect data about {topic}")
             
             if scraper_result.get("status") != "success":
@@ -55,7 +60,7 @@ def process_scraping_job(job_id: str, topic: str, subreddits: List[str]):
                 timed_out_flag = scraper_result.get("data", [{}])[0].get("timed_out", False) if scraper_result.get("data") else False
                 if timed_out_flag:
                     raise Exception(
-                        "Scraping timed out after 10 minutes with no data collected. "
+                        "Scraping timed out after 25 minutes with no data collected. "
                         "The topic may be too niche for these subreddits, or the API is slow. "
                         "Please try again or use a broader topic."
                     )
@@ -79,7 +84,7 @@ def process_scraping_job(job_id: str, topic: str, subreddits: List[str]):
         db.update_job(job_id, progress=40)
         
         try:
-            processor = ProcessorAgent()
+            processor = ProcessorAgent(job_id=job_id)
             processor_result = processor.run()
             
             if processor_result.get("status") not in ["success", "warning"]:
@@ -102,7 +107,7 @@ def process_scraping_job(job_id: str, topic: str, subreddits: List[str]):
         db.update_job(job_id, progress=65)
         
         try:
-            analyst = AnalystAgent()
+            analyst = AnalystAgent(job_id=job_id)
             analyst_result = analyst.run()
             
             if analyst_result.get("status") != "success":
@@ -129,7 +134,7 @@ def process_scraping_job(job_id: str, topic: str, subreddits: List[str]):
         db.update_job(job_id, progress=85)
         
         try:
-            advisor = AdvisorAgent()
+            advisor = AdvisorAgent(job_id=job_id)
             advisor_result = advisor.run()
             
             if advisor_result.get("status") != "success":
@@ -149,7 +154,7 @@ def process_scraping_job(job_id: str, topic: str, subreddits: List[str]):
         db.update_job(job_id, progress=95)
         
         try:
-            visualization = VisualizationAgent()
+            visualization = VisualizationAgent(job_id=job_id)
             visualization_result = visualization.run()
             
             if visualization_result.get("status") != "success":
@@ -169,7 +174,8 @@ def process_scraping_job(job_id: str, topic: str, subreddits: List[str]):
         try:
             if os.path.exists("shared_state.json"):
                 with open("shared_state.json", 'r') as f:
-                    final_state = json.load(f)
+                    raw = json.load(f)
+                final_state = raw.get("jobs", {}).get(job_id, {})
             else:
                 final_state = {}
         except Exception as e:
@@ -210,7 +216,7 @@ def process_scraping_job(job_id: str, topic: str, subreddits: List[str]):
         )
 
 
-def start_job_async(job_id: str, topic: str, subreddits: List[str]):
+def start_job_async(job_id: str, topic: str, subreddits: List[str], mode: str = "single"):
     """
     Start a scraping job in a completely isolated background thread.
 
@@ -218,12 +224,13 @@ def start_job_async(job_id: str, topic: str, subreddits: List[str]):
         job_id: Unique job identifier
         topic: Topic to analyze
         subreddits: List of subreddits to scrape
+        mode: "single" or "compare" — stored in shared_state so agents know the context
     """
 
     # Create daemon thread
     thread = threading.Thread(
         target=process_scraping_job,
-        args=(job_id, topic, subreddits),
+        args=(job_id, topic, subreddits, mode),
         daemon=True,
         name=f"scraper-{job_id}"
     )
@@ -231,4 +238,4 @@ def start_job_async(job_id: str, topic: str, subreddits: List[str]):
     # Start the thread
     thread.start()
 
-    print(f"[OK] Background job {job_id} started in isolated thread")
+    print(f"[OK] Background job {job_id} started in isolated thread (mode={mode})")

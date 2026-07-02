@@ -33,10 +33,11 @@ _SLEEP            = 1.5    # seconds between every request  (rule 1)
 _MAX_LIMIT        = 100    # items per request               (rule 2)
 
 # ─── Collection parameters ─────────────────────────────────────────────────────
-_MIN_COMMENTS       = 500
-_MAX_LOOKBACK_WEEKS = 24    # safety cap on outer loop
-_POST_POOL_TARGET   = 50    # minimum matching posts before fetching comments
-_SCRAPE_TIMEOUT_SECS = 600  # hard wall-clock limit for the whole scrape (10 min)
+_MIN_COMMENTS            = 500
+_MAX_LOOKBACK_WEEKS      = 24    # safety cap on outer loop
+_POST_POOL_TARGET        = 50    # minimum matching posts before fetching comments
+_SCRAPE_TIMEOUT_SECS     = 1500  # hard wall-clock limit for the whole scrape (25 min)
+_MAX_PAGES_WITHOUT_MATCH = 3     # bail a subreddit after this many consecutive keyword-empty pages
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -353,9 +354,10 @@ def scrape_with_api(
             print(f"\n--- r/{subreddit} ---")
 
             # ── STEP 2: Build matching post ID pool ─────────────────────────
-            matching_ids  = []
-            post_cursor   = start_ts
-            weeks_checked = 0
+            matching_ids    = []
+            post_cursor     = start_ts
+            weeks_checked   = 0
+            consec_no_match = 0   # early bail when subreddit has nothing on-topic
 
             while len(matching_ids) < _POST_POOL_TARGET and weeks_checked < _MAX_LOOKBACK_WEEKS:
                 if time.time() >= deadline:
@@ -381,6 +383,18 @@ def scrape_with_api(
                 print(f"  [posts] page {weeks_checked}: {len(posts)} fetched, "
                       f"{matched_this_page} matched | pool={len(matching_ids)} | "
                       f"cursor={oldest_ts}")
+
+                # Early bail: if too many consecutive pages have zero keyword matches,
+                # this subreddit is not on-topic — move on to the next one rather
+                # than burning the timeout scanning irrelevant history.
+                if matched_this_page == 0:
+                    consec_no_match += 1
+                    if consec_no_match >= _MAX_PAGES_WITHOUT_MATCH:
+                        print(f"  [posts] {_MAX_PAGES_WITHOUT_MATCH} consecutive "
+                              f"empty pages — skipping r/{subreddit}")
+                        break
+                else:
+                    consec_no_match = 0
 
                 post_cursor = oldest_ts
 
