@@ -19,17 +19,18 @@ if __name__ == "__main__":
     print(f"\n{'='*60}")
     print(f"🚀 Starting Sentiment Analysis Backend API")
     print(f"{'='*60}")
-    print(f"Host: 127.0.0.1")
-    print(f"Port: 8000")
-    print(f"Docs: http://127.0.0.1:8000/docs")
-    print(f"Health Check: http://127.0.0.1:8000/health")
+    host = "0.0.0.0"
+    port = 8000
+    print(f"Host: {host}")
+    print(f"Port: {port}")
+    print(f"Docs: http://{host}:{port}/docs")
+    print(f"Health Check: http://{host}:{port}/health")
     print(f"{'='*60}\n")
-    
-    # Use import string format to enable reload
+
     uvicorn.run(
-        "backend.api:app",  # ← Import string, not app object
-        host="127.0.0.1",
-        port=8000,
-        reload=True,
+        "backend.api:app",
+        host=host,
+        port=port,
+        reload=False,
         log_level="info"
     )
