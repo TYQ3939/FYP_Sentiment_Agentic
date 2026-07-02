@@ -4,19 +4,21 @@
 # Run this inside the pod terminal each time the pod starts
 # ============================================================
 
-cd /workspace/FYP_Sentiment_Agentic/sentiment_agentic
+cd /workspace/FYP_Sentiment_Agentic
+
+# Install screen if missing
+if ! command -v screen &>/dev/null; then
+    apt-get install -y screen -q
+fi
 
 # Kill any existing backend session
 screen -S backend -X quit 2>/dev/null || true
 
-# Start FastAPI inside a detached screen session
-screen -dmS backend bash -c "
-    source /workspace/FYP_Sentiment_Agentic/sentiment_agentic/.env 2>/dev/null || true
-    export \$(cat .env | grep -v '^#' | xargs)
-    python run_backend.py
-"
+# Load env vars and start FastAPI in a detached screen session
+export $(cat .env | grep -v '^#' | grep -v '^$' | xargs)
+screen -dmS backend python run_backend.py
 
-sleep 2
+sleep 3
 
 echo "[OK] Backend started in screen session 'backend'"
 echo ""
