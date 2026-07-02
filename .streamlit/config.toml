@@ -1,0 +1,12 @@
+[server]
+# Tell Streamlit Community Cloud to use the frontend requirements file
+# instead of the full requirements.txt
+headless = true
+enableCORS = false
+enableXsrfProtection = false
+
+[theme]
+primaryColor = "#2ecc71"
+backgroundColor = "#0e1117"
+secondaryBackgroundColor = "#1a1a2e"
+textColor = "#ffffff"

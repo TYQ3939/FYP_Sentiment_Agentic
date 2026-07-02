@@ -1,4 +1,4 @@
-﻿"""In-memory job database. Can be replaced with PostgreSQL/MongoDB."""
+"""Job database — uses MongoDB Atlas if MONGODB_URI is set, falls back to local JSON file."""
 
 import json
 import os
@@ -6,16 +6,64 @@ from datetime import datetime
 from typing import Dict, Optional
 import threading
 
-# Thread-safe job storage
-class JobDatabase:
+MONGODB_URI = os.getenv("MONGODB_URI", "")
+
+# ── MongoDB backend ────────────────────────────────────────────────────────────
+class MongoJobDatabase:
+    def __init__(self, uri: str):
+        from pymongo import MongoClient
+        self.client = MongoClient(uri)
+        self.col = self.client["fyp_sentiment"]["jobs"]
+        print("[DB] Connected to MongoDB Atlas")
+
+    def create_job(self, job_id: str, topic: str, subreddits: list) -> dict:
+        job = {
+            "_id": job_id,
+            "id": job_id,
+            "topic": topic,
+            "subreddits": subreddits,
+            "status": "pending",
+            "progress": 0,
+            "results": None,
+            "error": None,
+            "created_at": datetime.now().isoformat(),
+            "started_at": None,
+            "completed_at": None,
+        }
+        self.col.insert_one(job)
+        return job
+
+    def get_job(self, job_id: str) -> Optional[dict]:
+        doc = self.col.find_one({"_id": job_id})
+        if doc:
+            doc.pop("_id", None)
+        return doc
+
+    def update_job(self, job_id: str, **kwargs) -> bool:
+        result = self.col.update_one({"_id": job_id}, {"$set": kwargs})
+        return result.matched_count > 0
+
+    def list_jobs(self) -> list:
+        return [{k: v for k, v in doc.items() if k != "_id"}
+                for doc in self.col.find()]
+
+    def save_to_file(self):
+        pass  # MongoDB handles persistence
+
+    def jobs(self):
+        return {}
+
+
+# ── Local JSON fallback ────────────────────────────────────────────────────────
+class LocalJobDatabase:
     def __init__(self):
-        self.jobs: Dict[str, dict] = {}
+        self._jobs: Dict[str, dict] = {}
         self.lock = threading.Lock()
         self.db_file = "jobs_db.json"
-        self.load_from_file()
-    
+        self._load()
+        print("[DB] Using local JSON file (set MONGODB_URI to use MongoDB Atlas)")
+
     def create_job(self, job_id: str, topic: str, subreddits: list) -> dict:
-        """Create a new job."""
         with self.lock:
             job = {
                 "id": job_id,
@@ -27,48 +75,59 @@ class JobDatabase:
                 "error": None,
                 "created_at": datetime.now().isoformat(),
                 "started_at": None,
-                "completed_at": None
+                "completed_at": None,
             }
-            self.jobs[job_id] = job
-            self.save_to_file()
+            self._jobs[job_id] = job
+            self._save()
             return job
-    
+
     def get_job(self, job_id: str) -> Optional[dict]:
-        """Get job by ID."""
         with self.lock:
-            return self.jobs.get(job_id)
-    
+            return self._jobs.get(job_id)
+
     def update_job(self, job_id: str, **kwargs) -> bool:
-        """Update job fields."""
         with self.lock:
-            if job_id not in self.jobs:
+            if job_id not in self._jobs:
                 return False
-            
-            self.jobs[job_id].update(kwargs)
-            self.save_to_file()
+            self._jobs[job_id].update(kwargs)
+            self._save()
             return True
-    
+
     def list_jobs(self) -> list:
-        """List all jobs."""
         with self.lock:
-            return list(self.jobs.values())
-    
-    def save_to_file(self):
-        """Persist jobs to file."""
+            return list(self._jobs.values())
+
+    def _save(self):
         try:
-            with open(self.db_file, 'w') as f:
-                json.dump(self.jobs, f, indent=2, default=str)
+            with open(self.db_file, "w") as f:
+                json.dump(self._jobs, f, indent=2, default=str)
         except Exception as e:
-            print(f"[WARN] Failed to save jobs to file: {e}")
-    
-    def load_from_file(self):
-        """Load jobs from file."""
+            print(f"[WARN] Failed to save jobs: {e}")
+
+    def _load(self):
         if os.path.exists(self.db_file):
             try:
-                with open(self.db_file, 'r') as f:
-                    self.jobs = json.load(f)
+                with open(self.db_file, "r") as f:
+                    self._jobs = json.load(f)
             except Exception as e:
-                print(f"[WARN] Failed to load jobs from file: {e}")
+                print(f"[WARN] Failed to load jobs: {e}")
 
-# Global database instance
-db = JobDatabase()
+    # Keep attribute name compatible with old code that accesses db.jobs directly
+    @property
+    def jobs(self):
+        return self._jobs
+
+    def save_to_file(self):
+        self._save()
+
+
+# ── Auto-select backend ────────────────────────────────────────────────────────
+def _create_db():
+    if MONGODB_URI:
+        try:
+            return MongoJobDatabase(MONGODB_URI)
+        except Exception as e:
+            print(f"[WARN] MongoDB connection failed ({e}), falling back to local JSON")
+    return LocalJobDatabase()
+
+db = _create_db()
