@@ -56,8 +56,14 @@ app = FastAPI(
 
 @app.on_event("startup")
 async def startup_checks():
-    """Check all pipeline dependencies at startup so problems surface immediately."""
+    """Check all pipeline dependencies at startup so problems surface immediately.
+
+    Uses importlib.util.find_spec() for package presence checks (no actual
+    import cost) and reserves real imports only for checks that need runtime
+    state (CUDA, spaCy model path, StaticEmbedding, NLTK corpus).
+    """
     import os
+    import importlib.util
 
     W = 62
     issues = []
@@ -66,6 +72,10 @@ async def startup_checks():
     def ok(label):   print(f"  [OK]   {label}")
     def miss(label): print(f"  [MISS] {label}"); issues.append(label)
     def warn(label): print(f"  [WARN] {label}"); warnings_.append(label)
+
+    def pkg(name):
+        """Return True if package is installed (no import cost)."""
+        return importlib.util.find_spec(name) is not None
 
     print("\n" + "=" * W)
     print("  STARTUP CHECKS")
@@ -81,127 +91,107 @@ async def startup_checks():
         else:
             miss(f"{fname} missing in {model_dir}")
 
-    # ── 2. GPU / PyTorch ──────────────────────────────────────
+    # ── 2. GPU / PyTorch ─────────────────────────────────────
+    # Real import needed to query CUDA state
     print("\n  [2] GPU / PyTorch")
-    try:
-        import torch
-        ok(f"torch {torch.__version__}")
-        if torch.cuda.is_available():
-            gpu = torch.cuda.get_device_name(0)
-            mem = torch.cuda.get_device_properties(0).total_memory / 1e9
-            ok(f"CUDA GPU: {gpu} ({mem:.1f} GB)")
-        else:
-            warn("CUDA not available — BERTweet will run on CPU (slower)")
-    except Exception as e:
-        miss(f"torch import failed: {e}")
+    if pkg("torch"):
+        try:
+            import torch
+            ok(f"torch {torch.__version__}")
+            if torch.cuda.is_available():
+                gpu = torch.cuda.get_device_name(0)
+                mem = torch.cuda.get_device_properties(0).total_memory / 1e9
+                ok(f"CUDA GPU: {gpu} ({mem:.1f} GB)")
+            else:
+                warn("CUDA not available — BERTweet will run on CPU (slower)")
+        except Exception as e:
+            warn(f"CUDA check failed: {e}")
+    else:
+        miss("torch not installed")
 
-    # ── 3. Transformers / BERTweet ────────────────────────────
+    # ── 3. Transformers ───────────────────────────────────────
     print("\n  [3] Transformers")
-    try:
-        from transformers import AutoTokenizer, AutoModelForSequenceClassification
-        ok("transformers (AutoTokenizer, AutoModelForSequenceClassification)")
-    except Exception as e:
-        miss(f"transformers import failed: {e}")
+    if pkg("transformers"):
+        ok("transformers")
+    else:
+        miss("transformers not installed")
 
     # ── 4. spaCy + English model ──────────────────────────────
+    # find_spec checks spaCy; spacy.util.get_package_path checks the model
     print("\n  [4] spaCy")
-    try:
-        import spacy
-        ok(f"spacy {spacy.__version__}")
+    if pkg("spacy"):
+        import spacy.util
+        ok("spacy")
         try:
-            spacy.load("en_core_web_sm")
-            ok("en_core_web_sm model loaded")
-        except OSError:
+            spacy.util.get_package_path("en_core_web_sm")
+            ok("en_core_web_sm model installed")
+        except Exception:
             warn("en_core_web_sm not found — run: python -m spacy download en_core_web_sm")
-    except Exception as e:
-        miss(f"spacy import failed: {e}")
+    else:
+        miss("spacy not installed")
 
     # ── 5. NLTK data ──────────────────────────────────────────
+    # find_spec for the package; data.find() for the corpus
     print("\n  [5] NLTK")
-    try:
+    if pkg("nltk"):
         import nltk
-        nltk.data.find('corpora/stopwords')
-        ok("NLTK stopwords corpus")
-    except LookupError:
-        warn("NLTK stopwords not downloaded — will auto-download on first use")
-    except Exception as e:
-        miss(f"NLTK import failed: {e}")
-
-    # ── 6. BERTopic / ABSA stack ─────────────────────────────
-    print("\n  [6] ABSA Stack (BERTopic + UMAP + HDBSCAN + SentenceTransformers)")
-    try:
-        import bertopic
-        ok(f"bertopic {bertopic.__version__}")
-    except Exception as e:
-        miss(f"bertopic import failed: {e}")
-    try:
-        import umap
-        ok("umap-learn")
-    except Exception as e:
-        miss(f"umap import failed: {e}")
-    try:
-        import hdbscan
-        ok("hdbscan")
-    except Exception as e:
-        miss(f"hdbscan import failed: {e}")
-    try:
-        from sentence_transformers import SentenceTransformer
-        ok("sentence_transformers (SentenceTransformer)")
         try:
-            from sentence_transformers.models import StaticEmbedding
+            nltk.data.find("corpora/stopwords")
+            ok("NLTK stopwords corpus")
+        except LookupError:
+            warn("NLTK stopwords missing — will auto-download on first use")
+    else:
+        miss("nltk not installed")
+
+    # ── 6. ABSA stack ─────────────────────────────────────────
+    print("\n  [6] ABSA Stack (BERTopic + UMAP + HDBSCAN + SentenceTransformers)")
+    for name, label in [("bertopic", "bertopic"), ("umap", "umap-learn"),
+                        ("hdbscan", "hdbscan")]:
+        if pkg(name):
+            ok(label)
+        else:
+            miss(f"{label} not installed")
+
+    if pkg("sentence_transformers"):
+        ok("sentence_transformers")
+        # StaticEmbedding is a lightweight attribute check — import is already
+        # cached if sentence_transformers was found above
+        try:
+            from sentence_transformers.models import StaticEmbedding  # noqa: F401
             ok("sentence_transformers.models.StaticEmbedding")
         except ImportError:
-            warn("StaticEmbedding not found — BERTopic will fall back to K-Means (ABSA still works)")
-    except Exception as e:
-        miss(f"sentence_transformers import failed: {e}")
+            warn("StaticEmbedding not found — upgrade: pip install 'sentence-transformers>=3.3.0,<4.0.0'")
+    else:
+        miss("sentence_transformers not installed")
 
-    # ── 7. Wordcloud / Visualization ─────────────────────────
+    # ── 7. Visualization ──────────────────────────────────────
     print("\n  [7] Visualization")
-    try:
-        from wordcloud import WordCloud
-        ok("wordcloud")
-    except Exception as e:
-        miss(f"wordcloud import failed: {e}")
-    try:
-        import plotly
-        ok(f"plotly {plotly.__version__}")
-    except Exception as e:
-        miss(f"plotly import failed: {e}")
-    try:
-        import matplotlib
-        ok(f"matplotlib {matplotlib.__version__}")
-    except Exception as e:
-        miss(f"matplotlib import failed: {e}")
+    for name, label in [("wordcloud", "wordcloud"), ("plotly", "plotly"),
+                        ("matplotlib", "matplotlib")]:
+        if pkg(name):
+            ok(label)
+        else:
+            miss(f"{label} not installed")
 
-    # ── 8. LLM / Advisor ─────────────────────────────────────
+    # ── 8. LLM stack ──────────────────────────────────────────
     print("\n  [8] LLM Stack (Groq / LangChain)")
-    try:
-        from langchain_groq import ChatGroq
-        ok("langchain_groq (ChatGroq)")
-    except Exception as e:
-        miss(f"langchain_groq import failed: {e}")
-    try:
-        import groq
-        ok(f"groq {groq.__version__}")
-    except Exception as e:
-        miss(f"groq import failed: {e}")
+    for name, label in [("langchain_groq", "langchain_groq"),
+                        ("groq", "groq")]:
+        if pkg(name):
+            ok(label)
+        else:
+            miss(f"{label} not installed")
 
     # ── 9. Environment variables ──────────────────────────────
     print("\n  [9] Environment Variables")
-    env_checks = {
-        "GROQ_API_KEY":  "Advisor Agent (LLM insights)",
-        "TAVILY_API_KEY": "RCA web search tier 1 (optional)",
-        "SERPER_API_KEY": "RCA web search tier 2 (optional)",
-        "GOOGLE_API_KEY": "RCA web search tier 3 (optional)",
-    }
-    for key, usage in env_checks.items():
+    for key, critical in [("GROQ_API_KEY", True), ("TAVILY_API_KEY", False),
+                           ("SERPER_API_KEY", False), ("GOOGLE_API_KEY", False)]:
         if os.environ.get(key):
-            ok(f"{key}")
+            ok(key)
+        elif critical:
+            miss(f"{key} not set — Advisor Agent will FAIL")
         else:
-            if key == "GROQ_API_KEY":
-                miss(f"{key} not set — {usage} will FAIL")
-            else:
-                warn(f"{key} not set — {usage}")
+            warn(f"{key} not set (optional)")
 
     # ── 10. Data directories ──────────────────────────────────
     print("\n  [10] Data Directories")
