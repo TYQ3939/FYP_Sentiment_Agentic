@@ -24,34 +24,42 @@ git push origin main
 | Main file path | `sentiment_agentic/frontend/app.py` |
 | App URL | choose a name (e.g. `fyp-sentiment`) |
 
-4. Expand **Advanced settings**:
-   - Python version: `3.10`
-   - Requirements file: `sentiment_agentic/requirements_frontend.txt`
+4. Expand **Advanced settings** — you will see a TOML text area.
+
+Paste this into that TOML box:
+
+```toml
+[runtime]
+python_version = "3.10"
+```
+
+> If you see a **Python version dropdown** instead (not a TOML box), just select `3.10` from the dropdown. Both UI styles exist depending on which version of Streamlit Cloud you see.
 
 5. Click **Deploy**
 
 ---
 
-## 3. Add secrets
+## 3. Add secrets (also TOML format)
 
-After deployment, go to your app → **⋮ menu** → **Settings** → **Secrets**
+After deployment, go to your app → **⋮ menu top-right** → **Settings** → **Secrets**
 
-Paste this (replace with your real values):
+You will see a TOML text area. Paste this (replace values with your real keys):
 
 ```toml
-# Your RunPod backend URL — get this from RunPod dashboard
-# Pod -> Connect -> "HTTP Service" -> port 8000
+# Get this from RunPod dashboard -> your pod -> Connect -> HTTP Service -> port 8000
 # Looks like: https://abc1def2gh3i-8000.proxy.runpod.net
 API_BASE_URL = "https://YOUR_POD_ID-8000.proxy.runpod.net"
 
-GROQ_API_KEY        = "your_groq_api_key_here"
-TAVILY_API_KEY      = "your_tavily_api_key_here"
-SERPER_API_KEY      = "your_serper_api_key_here"
-GOOGLE_CSE_ID       = "your_google_cse_id_here"
-GOOGLE_API_KEY      = "your_google_api_key_here"
+GROQ_API_KEY     = "your_groq_api_key_here"
+TAVILY_API_KEY   = "your_tavily_api_key_here"
+SERPER_API_KEY   = "your_serper_api_key_here"
+GOOGLE_CSE_ID    = "your_google_cse_id_here"
+GOOGLE_API_KEY   = "your_google_api_key_here"
 ```
 
-Click **Save**. The app will reboot with the secrets applied.
+Click **Save**. The app will reboot automatically.
+
+> **Note:** The Advanced settings TOML (step 4) and the Secrets TOML (step 3) are two **separate** TOML boxes. Do not mix them — secrets go in the Secrets section, not Advanced settings.
 
 ---
 

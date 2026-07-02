@@ -95,7 +95,7 @@ with st.sidebar:
     
     st.divider()
     
-    if st.button("🗑️ Clear History", width='stretch'):
+    if st.button("🗑️ Clear History", use_container_width=True):
         st.session_state.session_history = []
         st.rerun()
 
@@ -114,11 +114,11 @@ if st.session_state.current_tab == "main":
         )
 
     with col2:
-        start_button = st.button("Run Analysis", type="primary", width='stretch')
+        start_button = st.button("Run Analysis", type="primary", use_container_width=True)
 
     with col3:
         compare_label = "- Remove Compare" if st.session_state.compare_mode_enabled else "+ Add Compare"
-        if st.button(compare_label, width='stretch'):
+        if st.button(compare_label, use_container_width=True):
             st.session_state.compare_mode_enabled = not st.session_state.compare_mode_enabled
             if not st.session_state.compare_mode_enabled:
                 st.session_state.compare_topic_b = None
@@ -569,8 +569,8 @@ elif st.session_state.current_tab == "results":
                                 height=400
                             )
                             
-                            st.plotly_chart(fig, width='stretch')
-                        
+                            st.plotly_chart(fig, use_container_width=True)
+
                         except Exception as e:
                             st.error(f"Could not display chart: {str(e)}")
 
@@ -786,8 +786,8 @@ elif st.session_state.current_tab == "results":
                                 # Display aspect chart
                                 fig = generate_aspect_sentiment_chart(aspect_analysis)
                                 if fig:
-                                    st.plotly_chart(fig, width='stretch')
-                                
+                                    st.plotly_chart(fig, use_container_width=True)
+
                                 # Display aspect details table — top 9 named + Others always at end
                                 st.subheader("Top Aspects")
 
@@ -889,7 +889,7 @@ elif st.session_state.current_tab == "results":
                                 cols = st.columns(2)
                                 for idx, question in enumerate(suggested_questions):
                                     with cols[idx % 2]:
-                                        if st.button(question, width='stretch', key=f"suggested_{idx}"):
+                                        if st.button(question, use_container_width=True, key=f"suggested_{idx}"):
                                             if "chat_history" not in st.session_state:
                                                 st.session_state.chat_history = []
                                             with st.spinner("Thinking..."):
