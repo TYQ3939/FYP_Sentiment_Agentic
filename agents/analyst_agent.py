@@ -4,10 +4,11 @@ import json
 class AnalystAgent(BaseAgent):
     """Analyst Agent that performs sentiment analysis using fine-tuned BERTweet model on GPU."""
     
-    def __init__(self):
+    def __init__(self, job_id=None):
         super().__init__(
             "AnalystAgent",
-            "You are a sentiment analysis agent that analyzes data using fine-tuned BERTweet model on GPU."
+            "You are a sentiment analysis agent that analyzes data using fine-tuned BERTweet model on GPU.",
+            job_id=job_id,
         )
 
     def run(self) -> dict:
