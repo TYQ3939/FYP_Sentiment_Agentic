@@ -894,9 +894,13 @@ elif st.session_state.current_tab == "results":
                                                 st.session_state.chat_history = []
                                             with st.spinner("Thinking..."):
                                                 try:
-                                                    from agents.advisor_agent import AdvisorAgent
-                                                    advisor = AdvisorAgent(job_id=job_id)
-                                                    answer = advisor.answer_question(question)
+                                                    resp = requests.post(
+                                                        f"{API_BASE_URL}/advisor/question/{job_id}",
+                                                        json={"question": question},
+                                                        timeout=60,
+                                                    )
+                                                    resp.raise_for_status()
+                                                    answer = resp.json().get("answer", "No answer returned.")
                                                     st.session_state.chat_history.append((question, answer))
                                                     st.rerun()
                                                 except Exception as e:
@@ -908,15 +912,13 @@ elif st.session_state.current_tab == "results":
                                 with st.chat_message("assistant"):
                                     with st.spinner("Thinking..."):
                                         try:
-                                            project_root = os.path.dirname(
-                                                os.path.dirname(os.path.abspath(__file__))
+                                            resp = requests.post(
+                                                f"{API_BASE_URL}/advisor/question/{job_id}",
+                                                json={"question": user_question},
+                                                timeout=60,
                                             )
-                                            if project_root not in sys.path:
-                                                sys.path.insert(0, project_root)
-
-                                            from agents.advisor_agent import AdvisorAgent
-                                            advisor = AdvisorAgent(job_id=job_id)
-                                            answer  = advisor.answer_question(user_question)
+                                            resp.raise_for_status()
+                                            answer = resp.json().get("answer", "No answer returned.")
                                             st.session_state.chat_history.append((user_question, answer))
                                             st.write(answer)
                                         except Exception as e:

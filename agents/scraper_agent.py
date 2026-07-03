@@ -103,7 +103,8 @@ class ScraperAgent(BaseAgent):
                     self.log("No local dataset found for this topic")
 
             # Step 6 — Export (versioned to avoid overwriting prior runs)
-            csv_dir = "./data/filtered_data"
+            from agents.base_agent import _PROJECT_ROOT
+            csv_dir = os.path.join(_PROJECT_ROOT, "data", "filtered_data")
             os.makedirs(csv_dir, exist_ok=True)
             safe     = topic.replace(" ", "_").replace("/", "_")[:60]
             csv_path = versioned_path(csv_dir, f"{safe}_comments", ".csv")
@@ -157,7 +158,8 @@ class ScraperAgent(BaseAgent):
         Write the scrape result to data/filtered_data/ so ProcessorAgent can
         find it. Uses versioned filenames so same-topic runs never overwrite.
         """
-        filtered_data_dir = "./data/filtered_data"
+        from agents.base_agent import _PROJECT_ROOT
+        filtered_data_dir = os.path.join(_PROJECT_ROOT, "data", "filtered_data")
         os.makedirs(filtered_data_dir, exist_ok=True)
 
         safe     = topic.replace(" ", "_").replace("/", "_")[:60]

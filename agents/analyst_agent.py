@@ -147,7 +147,8 @@ class AnalystAgent(BaseAgent):
                 import os
                 from datetime import datetime as _dt
                 topic_slug = topic.replace(" ", "_").replace("/", "_")[:60] if topic else "unknown"
-                analysis_dir = "./data/analysis"
+                from agents.base_agent import _PROJECT_ROOT
+                analysis_dir = os.path.join(_PROJECT_ROOT, "data", "analysis")
                 os.makedirs(analysis_dir, exist_ok=True)
 
                 # Sentiment results file (all comments with full text + label)

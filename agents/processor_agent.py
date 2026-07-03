@@ -27,7 +27,8 @@ class ProcessorAgent(BaseAgent):
             # Step 1: Find the filtered data file for this job
             self.log("Step 1: Loading filtered data file from data/filtered_data...")
 
-            filtered_data_dir = "./data/filtered_data"
+            from agents.base_agent import _PROJECT_ROOT
+            filtered_data_dir = os.path.join(_PROJECT_ROOT, "data", "filtered_data")
 
             if not os.path.exists(filtered_data_dir):
                 self.log(f"⚠️ Filtered data directory not found: {filtered_data_dir}")
@@ -235,7 +236,7 @@ class ProcessorAgent(BaseAgent):
             try:
                 from datetime import datetime as _dt
                 topic_slug = topic.replace(" ", "_").replace("/", "_")[:60] if topic else "unknown"
-                processed_dir = "./data/processed_data"
+                processed_dir = os.path.join(_PROJECT_ROOT, "data", "processed_data")
                 os.makedirs(processed_dir, exist_ok=True)
 
                 export_sources = []

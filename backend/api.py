@@ -26,6 +26,9 @@ class ScrapeRequest(BaseModel):
 class RCARequest(BaseModel):
     date: str  # YYYY-MM-DD of the anomaly to investigate
 
+class AdvisorQuestionRequest(BaseModel):
+    question: str
+
 class JobStatusLite(BaseModel):
     """Lightweight job status without large results payload"""
     id: str
@@ -394,7 +397,7 @@ async def run_rca_analysis(job_id: str, request: RCARequest):
         if not detailed_sentiments:
             # Try loading from shared state
             import json, os
-            state_path = "./data/shared_state.json"
+            state_path = "shared_state.json"
             if os.path.exists(state_path):
                 with open(state_path, "r", encoding="utf-8") as f:
                     state = json.load(f)
@@ -421,7 +424,7 @@ async def run_rca_analysis(job_id: str, request: RCARequest):
         # Also write to shared_state for AdvisorAgent context
         try:
             import json, os
-            state_path = "./data/shared_state.json"
+            state_path = "shared_state.json"
             if os.path.exists(state_path):
                 with open(state_path, "r", encoding="utf-8") as f:
                     state = json.load(f)
@@ -435,6 +438,23 @@ async def run_rca_analysis(job_id: str, request: RCARequest):
 
     except HTTPException:
         raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/advisor/question/{job_id}")
+async def advisor_question(job_id: str, request: AdvisorQuestionRequest):
+    """Answer a follow-up question using the AdvisorAgent running on the backend."""
+    job = db.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    if job["status"] != "completed":
+        raise HTTPException(status_code=400, detail="Job must be completed before asking questions")
+    try:
+        from agents.advisor_agent import AdvisorAgent
+        advisor = AdvisorAgent(job_id=job_id)
+        answer = advisor.answer_question(request.question)
+        return {"answer": answer}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

@@ -59,7 +59,8 @@ class LocalJobDatabase:
     def __init__(self):
         self._jobs: Dict[str, dict] = {}
         self.lock = threading.Lock()
-        self.db_file = "jobs_db.json"
+        _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        self.db_file = os.path.join(_root, "jobs_db.json")
         self._load()
         print("[DB] Using local JSON file (set MONGODB_URI to use MongoDB Atlas)")
 

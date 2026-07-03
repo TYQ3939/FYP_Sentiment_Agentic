@@ -13,7 +13,9 @@ load_dotenv()
 # when they both try to read-modify-write at the same moment.
 _state_lock = threading.Lock()
 
-_STATE_FILE = "shared_state.json"
+# Absolute path so agents work regardless of the process cwd
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_STATE_FILE = os.path.join(_PROJECT_ROOT, "shared_state.json")
 
 
 # Base Agent class that will be inherited by the Worker Agents
@@ -153,9 +155,8 @@ class BaseAgent:
         Must be called once per job, before ScraperAgent runs.
         """
         with _state_lock:
-            state_file = _STATE_FILE
             try:
-                with open(state_file, 'r', encoding='utf-8') as f:
+                with open(_STATE_FILE, 'r', encoding='utf-8') as f:
                     raw = json.load(f)
             except Exception:
                 raw = {"mode": mode, "jobs": {}}
@@ -175,7 +176,7 @@ class BaseAgent:
                 "visuals_ready": False
             }
 
-            with open(state_file, 'w', encoding='utf-8') as f:
+            with open(_STATE_FILE, 'w', encoding='utf-8') as f:
                 json.dump(raw, f, indent=4)
 
     # ── Default structure ─────────────────────────────────────────────────────
