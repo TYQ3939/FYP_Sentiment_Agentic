@@ -43,7 +43,6 @@ st.set_page_config(
 
 st.title("🤖 Multi-Agent Sentiment Analysis")
 st.write("Analyze social media sentiment using a team of specialized AI agents.")
-st.write("💡 **Note:** Backend API must be running on `http://localhost:8000`")
 
 # ========== INITIALIZE SESSION STATE ==========
 
@@ -89,7 +88,7 @@ with st.sidebar:
         else:
             st.error("❌ API Error")
     except requests.exceptions.ConnectionError:
-        st.error("❌ API Offline\n\nStart backend with:\n```\npython run_backend.py\n```")
+        st.error("❌ Backend offline — please start the RunPod pod.")
     except Exception as e:
         st.error(f"❌ API Error: {str(e)[:50]}")
     
@@ -202,7 +201,7 @@ if st.session_state.current_tab == "main":
                     st.error(f"Failed to start job: {response.json().get('detail', 'Unknown error')}")
 
         except requests.exceptions.ConnectionError:
-            st.error("Cannot connect to backend API. Start the backend with:\n```bash\npython run_backend.py\n```")
+            st.error("❌ Cannot reach the backend. Please ensure the RunPod pod is running.")
         except Exception as e:
             st.error(f"Error: {str(e)}")
 
@@ -325,7 +324,7 @@ elif st.session_state.current_tab == "monitoring":
                 time.sleep(5)
                 st.rerun()
             except requests.exceptions.ConnectionError:
-                status_placeholder.error("Cannot connect to the backend. Make sure it is running.")
+                status_placeholder.error("❌ Cannot reach the backend. Please ensure the RunPod pod is running.")
             except Exception as e:
                 status_placeholder.error(f"Error fetching status: {str(e)}")
 
@@ -1032,7 +1031,7 @@ elif st.session_state.current_tab == "results":
             st.error("⏱️ **Request Timeout**: Server took too long to respond. Results are likely still being processed.")
             st.info("💡 Try these solutions:\n1. Wait a few more seconds\n2. Click the back button and monitor the job\n3. Refresh the page manually")
         except requests.exceptions.ConnectionError:
-            st.error("❌ **Connection Error**: Cannot reach the backend API.\n\nMake sure the backend is running:\n```bash\npython run_backend.py\n```")
+            st.error("❌ Cannot reach the backend. Please ensure the RunPod pod is running.")
         except Exception as e:
             st.error(f"❌ Error fetching results: {str(e)}")
             st.info("If this persists, try:\n1. Going back to monitor the job\n2. Checking the backend logs for errors")
