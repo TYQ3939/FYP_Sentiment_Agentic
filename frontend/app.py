@@ -426,8 +426,104 @@ elif st.session_state.current_tab == "results":
                             st.rerun()
                     
                     with col2:
-                        if st.button("📥 Export Results"):
-                            st.info("Export functionality coming soon!")
+                        with st.popover("📥 Export Results", use_container_width=True):
+                            import io, csv as _csv, json as _json
+                            from datetime import datetime as _dt
+
+                            _topic   = st.session_state.get("current_topic", "analysis")
+                            _slug    = _topic.replace(" ", "_").replace("/", "_")[:40]
+                            _analyst = results.get("analyst", {})
+                            _analysis = _analyst.get("analysis", {})
+                            _detailed = _analysis.get("detailed_sentiments", [])
+                            _aspects  = (
+                                results.get("advisor", {}).get("aspect_analysis")
+                                or results.get("visualization", {})
+                                         .get("visualization_data", {})
+                                         .get("aspect_analysis", {})
+                                or {}
+                            )
+                            _advisor = results.get("advisor", {})
+
+                            st.markdown("**Choose export format:**")
+
+                            # ── 1. Sentiment data CSV ─────────────────────
+                            if _detailed:
+                                _buf = io.StringIO()
+                                _w = _csv.writer(_buf)
+                                _w.writerow(["text", "sentiment", "confidence", "created_at"])
+                                for _r in _detailed:
+                                    _w.writerow([
+                                        _r.get("text", ""),
+                                        _r.get("label", ""),
+                                        f'{_r.get("confidence", 0):.4f}',
+                                        _r.get("created_at", ""),
+                                    ])
+                                st.download_button(
+                                    "📄 Sentiment Data (.csv)",
+                                    data=_buf.getvalue(),
+                                    file_name=f"sentiment_{_slug}.csv",
+                                    mime="text/csv",
+                                    use_container_width=True,
+                                    key="dl_sentiment_csv",
+                                )
+                            else:
+                                st.caption("No sentiment data available")
+
+                            # ── 2. Aspect analysis CSV ────────────────────
+                            if _aspects:
+                                _buf2 = io.StringIO()
+                                _w2 = _csv.writer(_buf2)
+                                _w2.writerow([
+                                    "Aspect", "Positive %", "Positive Count",
+                                    "Neutral %", "Neutral Count",
+                                    "Negative %", "Negative Count", "Total Mentions",
+                                ])
+                                for _asp, _d in sorted(
+                                    _aspects.items(),
+                                    key=lambda x: x[1].get("total_mentions", 0),
+                                    reverse=True,
+                                ):
+                                    _w2.writerow([
+                                        _asp,
+                                        f"{_d.get('positive', {}).get('percentage', 0):.1f}",
+                                        _d.get('positive', {}).get('count', 0),
+                                        f"{_d.get('neutral',  {}).get('percentage', 0):.1f}",
+                                        _d.get('neutral',  {}).get('count', 0),
+                                        f"{_d.get('negative', {}).get('percentage', 0):.1f}",
+                                        _d.get('negative', {}).get('count', 0),
+                                        _d.get('total_mentions', 0),
+                                    ])
+                                st.download_button(
+                                    "📊 Aspect Analysis (.csv)",
+                                    data=_buf2.getvalue(),
+                                    file_name=f"aspects_{_slug}.csv",
+                                    mime="text/csv",
+                                    use_container_width=True,
+                                    key="dl_aspects_csv",
+                                )
+                            else:
+                                st.caption("No aspect data available")
+
+                            # ── 3. Full summary JSON ──────────────────────
+                            _summary = {
+                                "topic": _topic,
+                                "exported_at": _dt.now().isoformat(),
+                                "overall_sentiment": _analysis.get("overall_sentiment"),
+                                "confidence": _analysis.get("confidence"),
+                                "total_texts_analyzed": _analysis.get("total_texts_analyzed"),
+                                "sentiment_distribution": _analysis.get("sentiment_distribution"),
+                                "advisor_insights": _advisor.get("advisor_insights", {}),
+                                "recommendations": _advisor.get("recommendations", []),
+                                "aspect_analysis": _aspects,
+                            }
+                            st.download_button(
+                                "📋 Full Summary (.json)",
+                                data=_json.dumps(_summary, indent=2, ensure_ascii=False),
+                                file_name=f"summary_{_slug}.json",
+                                mime="application/json",
+                                use_container_width=True,
+                                key="dl_summary_json",
+                            )
 
                     with col3:
                         if st.session_state.get("compare_job_id_b"):
